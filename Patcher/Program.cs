@@ -19,6 +19,18 @@ if (args.Length == 1 && args[0].Equals("restore", StringComparison.OrdinalIgnore
     return;
 }
 
+if (args.Length == 1 && args[0].Equals("netdebug", StringComparison.OrdinalIgnoreCase))
+{
+    NetDebug();
+    return;
+}
+
+if (args.Length == 1 && args[0].Equals("unnetdebug", StringComparison.OrdinalIgnoreCase))
+{
+    UnNetDebug();
+    return;
+}
+
 if (args.Length == 1 && args[0].Equals("diagnose", StringComparison.OrdinalIgnoreCase))
 {
     Diagnose();
@@ -374,6 +386,127 @@ void Undiagnose()
     Console.WriteLine("Diagnose patch removed.");
 }
 
+void NetDebug()
+{
+    string? dll = FindFile(LidgrenDllName);
+    if (dll is null)
+    {
+        Console.Error.WriteLine($"Could not find {LidgrenDllName}.");
+        Environment.Exit(1); return;
+    }
+
+    string backup = dll + ".netdebugbak";
+    if (File.Exists(backup))
+    {
+        Console.Error.WriteLine("Network debug already enabled. Run 'unnetdebug' first.");
+        Environment.Exit(1); return;
+    }
+
+    File.Copy(dll, backup);
+
+    var module     = ModuleDefinition.FromFile(dll);
+    var corlib     = module.CorLibTypeFactory;
+    var scope      = corlib.CorLibScope;
+
+    var fileType   = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System",    "String");
+
+    var appendAll  = new MemberReference(fileType,   "AppendAllText",
+        MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String));
+    var concat3    = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String));
+    var concat4    = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String, corlib.String));
+
+    var toString   = new MemberReference(
+        new TypeReference(module, scope, "System", "Int32"), "ToString",
+        MethodSignature.CreateInstance(corlib.String));
+
+    // Patch NetUtility.Resolve(string, int) — log every call
+    var netUtility = module.TopLevelTypes.First(t => t.Name == "NetUtility");
+    var resolve    = netUtility.Methods.First(m =>
+        m.Name == "Resolve" &&
+        m.Parameters.Count == 2 &&
+        m.Parameters[1].ParameterType.IsTypeOf("System", "Int32"));
+
+    var rBody      = resolve.CilMethodBody!;
+    var portStrVar = new CilLocalVariable(corlib.String);
+    rBody.LocalVariables.Add(portStrVar);
+
+    var resolvePrefix = new List<CilInstruction>
+    {
+        // portStr = port.ToString()
+        new(CilOpCodes.Ldarga,   resolve.Parameters[1]),
+        new(CilOpCodes.Call,     toString),
+        new(CilOpCodes.Stloc,   portStrVar),
+        // File.AppendAllText("network_debug.log", "[resolve] " + ipOrHost + ":" + portStr + "\n")
+        new(CilOpCodes.Ldstr,   "network_debug.log"),
+        new(CilOpCodes.Ldstr,   "[resolve] "),
+        new(CilOpCodes.Ldarg,   resolve.Parameters[0]),
+        new(CilOpCodes.Ldstr,   ":"),
+        new(CilOpCodes.Call,    concat3),
+        new(CilOpCodes.Ldloc,   portStrVar),
+        new(CilOpCodes.Ldstr,   "\n"),
+        new(CilOpCodes.Call,    concat3),
+        new(CilOpCodes.Call,    appendAll),
+    };
+
+    for (int i = 0; i < resolvePrefix.Count; i++)
+        rBody.Instructions.Insert(i, resolvePrefix[i]);
+    rBody.Instructions.OptimizeMacros();
+
+    // Patch NetPeer.Connect(string host, int port) — log every connect attempt
+    var netPeer = module.TopLevelTypes.First(t => t.Name == "NetPeer");
+    var connect = netPeer.Methods.FirstOrDefault(m =>
+        m.Name == "Connect" &&
+        m.Parameters.Count >= 2 &&
+        m.Parameters[0].ParameterType.IsTypeOf("System", "String") &&
+        m.Parameters[1].ParameterType.IsTypeOf("System", "Int32"));
+
+    if (connect?.CilMethodBody is not null)
+    {
+        var cBody      = connect.CilMethodBody;
+        var cPortVar   = new CilLocalVariable(corlib.String);
+        cBody.LocalVariables.Add(cPortVar);
+
+        var connectPrefix = new List<CilInstruction>
+        {
+            new(CilOpCodes.Ldarga,  connect.Parameters[1]),
+            new(CilOpCodes.Call,    toString),
+            new(CilOpCodes.Stloc,  cPortVar),
+            new(CilOpCodes.Ldstr,  "network_debug.log"),
+            new(CilOpCodes.Ldstr,  "[connect] "),
+            new(CilOpCodes.Ldarg,  connect.Parameters[0]),
+            new(CilOpCodes.Ldstr,  ":"),
+            new(CilOpCodes.Call,   concat3),
+            new(CilOpCodes.Ldloc,  cPortVar),
+            new(CilOpCodes.Ldstr,  "\n"),
+            new(CilOpCodes.Call,   concat3),
+            new(CilOpCodes.Call,   appendAll),
+        };
+
+        for (int i = 0; i < connectPrefix.Count; i++)
+            cBody.Instructions.Insert(i, connectPrefix[i]);
+        cBody.Instructions.OptimizeMacros();
+    }
+
+    module.Write(dll);
+    Console.WriteLine("Network debug enabled. Resolve and Connect calls logged to network_debug.log in the game folder.");
+}
+
+void UnNetDebug()
+{
+    string? dll = FindFile(LidgrenDllName);
+    if (dll is null) { Console.Error.WriteLine($"Could not find {LidgrenDllName}."); Environment.Exit(1); return; }
+
+    string backup = dll + ".netdebugbak";
+    if (!File.Exists(backup)) { Console.Error.WriteLine("Network debug not enabled."); Environment.Exit(1); return; }
+
+    File.Copy(backup, dll, overwrite: true);
+    File.Delete(backup);
+    Console.WriteLine("Network debug disabled.");
+}
+
 void PrintUsage()
 {
     Console.WriteLine("Apotheon Arena — Master Server Patcher");
@@ -382,6 +515,8 @@ void PrintUsage()
     Console.WriteLine("  ApotheonArenaMPpatch.exe restore    restore original Lidgren.Network.dll");
     Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose   inject crash logger into ApotheonArena.exe");
     Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose remove crash logger");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log Resolve/Connect calls to network_debug.log");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe unnetdebug remove network debug logging");
     Console.WriteLine();
     Console.WriteLine($"  After patching, edit {ConfigFileName} in the game folder.");
     Console.WriteLine("  Supports any IP or hostname — no length limit.");
