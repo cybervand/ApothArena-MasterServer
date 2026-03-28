@@ -67,9 +67,10 @@ void OnRegister(NetIncomingMessage msg)
     bool isNew = !hosts.ContainsKey(id);
     hosts[id] = new HostEntry(id, internalIP, externalIP, json, DateTime.UtcNow);
 
-    Console.WriteLine(isNew
-        ? $"[register]  {id}  ext={externalIP}  int={internalIP}"
-        : $"[heartbeat] {id}");
+    if (isNew)
+        Console.WriteLine($"[register]  id={id}  ext={externalIP}  int={internalIP}  info={json}");
+    else
+        Console.WriteLine($"[heartbeat] id={id}  ext={externalIP}  int={internalIP}");
 }
 
 void OnQuit(NetIncomingMessage msg)
@@ -93,8 +94,12 @@ void OnNatIntro(NetIncomingMessage msg)
         return;
     }
 
+    Console.WriteLine($"[nat] introducing:");
+    Console.WriteLine($"[nat]   client  ext={clientExternal}  int={clientInternal}");
+    Console.WriteLine($"[nat]   host    ext={host.ExternalIP}  int={host.InternalIP}");
+    Console.WriteLine($"[nat]   token={token}");
     peer.Introduce(host.InternalIP, host.ExternalIP, clientInternal, clientExternal, token);
-    Console.WriteLine($"[nat] {clientExternal} <-> {host.ExternalIP}");
+    Console.WriteLine($"[nat] introduce sent");
 }
 
 void OnListRequest(NetIncomingMessage msg)
