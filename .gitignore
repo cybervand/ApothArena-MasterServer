@@ -5,11 +5,14 @@
 !.gitignore
 !README.md
 
-# Patcher source + published binaries
+# Patcher source only (binaries distributed via GitHub Releases)
 !Patcher/
 !Patcher/**
 Patcher/bin/
 Patcher/obj/
+Patcher/publish/
+Patcher/publish-linux/
+Patcher/publish-linux.zip
 
 # MasterServer source
 !MasterServer/
