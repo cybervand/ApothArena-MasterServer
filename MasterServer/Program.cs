@@ -114,7 +114,7 @@ void OnListRequest(NetIncomingMessage msg)
         res.Write(host.Id);
         res.Write(host.InternalIP);
         res.Write(host.ExternalIP);
-        res.Write(FixServerInfoIp(host.ServerInfoJson, host.ExternalIP.Address.ToString()));
+        res.Write(FixServerInfoIp(host.ServerInfoJson, PickIp(host.InternalIP, host.ExternalIP, client)));
         res.Write("");               // country — unknown
         peer.SendUnconnectedMessage(res, client);
     }
@@ -129,6 +129,16 @@ string FixServerInfoIp(string json, string externalIp)
     var valueEnd   = json.IndexOf('"', valueStart);
     if (valueEnd < 0) return json;
     return json[..valueStart] + externalIp + json[valueEnd..];
+}
+
+string PickIp(IPEndPoint hostInternal, IPEndPoint hostExternal, IPEndPoint client)
+{
+    var h = hostInternal.Address.GetAddressBytes();
+    var c = client.Address.GetAddressBytes();
+    if (h.Length == 4 && c.Length == 4 &&
+        h[0] == c[0] && h[1] == c[1] && h[2] == c[2])
+        return hostInternal.Address.ToString();
+    return hostExternal.Address.ToString();
 }
 
 IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback)
