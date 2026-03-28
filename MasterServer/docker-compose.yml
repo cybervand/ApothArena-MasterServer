@@ -1,0 +1,11 @@
+services:
+  apotharena-masterserver:
+    build: .
+    container_name: apotharena-masterserver
+    restart: unless-stopped
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

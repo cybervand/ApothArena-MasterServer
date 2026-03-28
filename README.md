@@ -1,0 +1,150 @@
+# ApothArena-masterserver
+
+The official Apotheon Arena master server is offline. This project revives online
+multiplayer with a community-run replacement master server and a client patcher to
+redirect the game to it.
+
+---
+
+## For players — patching the game
+
+### Requirements
+
+No extra software needed. The patcher is a standalone `.exe` (Windows) or binary (Linux).
+
+### How to install
+
+1. Download `ApotheonArenaMPpatch.exe` (Windows) or `ApotheonArenaMPpatch` (Linux)
+   from the [Releases](../../releases) page.
+
+2. Copy it into your **Apotheon Arena game folder**
+   (the same folder as `ApotheonArena.exe` and `Lidgren.Network.dll`).
+
+3. Run it:
+
+   **Windows** — open a Command Prompt in the game folder and run:
+   ```
+   ApotheonArenaMPpatch.exe
+   ```
+   > Hold Shift, right-click inside the folder, select "Open PowerShell window here",
+   > then type the command above.
+
+   **Linux** — open a terminal in the game folder and run:
+   ```
+   chmod +x ApotheonArenaMPpatch
+   ./ApotheonArenaMPpatch
+   ```
+
+4. Open `master_server.txt` in the game folder and replace the IP with the
+   community server address.
+
+5. Launch the game normally and go online.
+
+### Changing the server
+
+Edit `master_server.txt` in the game folder at any time. Put the IP address or
+hostname on its own line — lines starting with `#` are treated as comments.
+Restart the game after saving.
+
+### Uninstalling
+
+```
+ApotheonArenaMPpatch.exe restore
+```
+
+This restores the original `Lidgren.Network.dll` from the backup made when you
+first ran the patcher. You can then delete `ApotheonArenaMPpatch.exe` and
+`master_server.txt`.
+
+### Troubleshooting
+
+**"Could not find Lidgren.Network.dll"**
+Make sure the patcher is in the Apotheon Arena game folder, not a subfolder.
+
+**"Already patched"**
+You have already run the patcher. Just edit `master_server.txt` to change servers.
+Run `restore` first if you need to re-patch.
+
+**Servers not showing up in the browser**
+- Check that `master_server.txt` contains the correct server IP
+- Make sure the game is not blocked by your firewall (allow UDP on port 14242)
+- The server browser may take a few seconds to populate — wait a moment
+
+---
+
+## For server operators — running the master server
+
+### Requirements
+
+- Linux host with Docker and Docker Compose (Unraid, Ubuntu, Debian, etc.)
+- UDP port **14343** open and reachable from the internet
+
+### Deploying
+
+```bash
+git clone https://github.com/your-username/ApothArena-masterserver
+cd ApothArena-masterserver/MasterServer
+docker compose up -d --build
+```
+
+The server listens on UDP port 14343 and requires `network_mode: host` (already
+set in `docker-compose.yml`) so it can see real client IPs for NAT hole punching.
+Do not run it behind Docker bridge networking — clients will fail to connect to
+each other.
+
+### Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+### Router / firewall
+
+Forward **UDP 14343** to the machine running the master server. No other ports
+need forwarding — players connect to each other via UDP hole punching without
+port forwarding on their end.
+
+### Logs
+
+```bash
+docker logs apotharena-masterserver -f
+```
+
+---
+
+## Building from source
+
+Requires [.NET 8 SDK](https://dotnet.microsoft.com/download).
+
+**Patcher (Windows x64):**
+```
+cd Patcher
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
+```
+
+**Patcher (Linux x64):**
+```
+cd Patcher
+dotnet publish -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o ./publish-linux
+```
+
+**Master server:**
+```
+cd MasterServer
+docker compose up --build
+```
+
+---
+
+## How it works
+
+Apotheon Arena uses [Lidgren.Network](https://github.com/lidgren/lidgren-network-gen3)
+for multiplayer. The game has a hardcoded master server IP baked into
+`Lidgren.Network.dll`. Since that server is gone, the patcher injects new IL code
+into the DLL that reads the master server address from `master_server.txt` instead,
+supporting any IP or hostname of any length.
+
+The replacement master server handles host registration, server list requests, and
+NAT introduction so players can connect directly to each other without port
+forwarding.
