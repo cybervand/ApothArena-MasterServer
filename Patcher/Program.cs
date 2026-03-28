@@ -95,20 +95,18 @@ void PatchLidgren(string path, string backup)
     // ---- type references ---------------------------------------------------
     var fileType      = new TypeReference(module, scope, "System.IO", "File");
     var pathType      = new TypeReference(module, scope, "System.IO", "Path");
-    var appDomainType = new TypeReference(module, scope, "System",    "AppDomain");
+    var dirType       = new TypeReference(module, scope, "System.IO", "Directory");
     var stringType    = new TypeReference(module, scope, "System",    "String");
 
     // ---- method references -------------------------------------------------
-    var fileExists    = new MemberReference(fileType,      "Exists",
+    var fileExists    = new MemberReference(fileType, "Exists",
         MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
-    var readAllLines  = new MemberReference(fileType,      "ReadAllLines",
+    var readAllLines  = new MemberReference(fileType, "ReadAllLines",
         MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
-    var pathCombine   = new MemberReference(pathType,      "Combine",
+    var pathCombine   = new MemberReference(pathType, "Combine",
         MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String));
-    var getCurDomain  = new MemberReference(appDomainType, "get_CurrentDomain",
-        MethodSignature.CreateStatic(new TypeDefOrRefSignature(appDomainType)));
-    var getBaseDir    = new MemberReference(appDomainType, "get_BaseDirectory",
-        MethodSignature.CreateInstance(corlib.String));
+    var getCurDir     = new MemberReference(dirType,  "GetCurrentDirectory",
+        MethodSignature.CreateStatic(corlib.String));
     var strEquals     = new MemberReference(stringType,    "op_Equality",
         MethodSignature.CreateStatic(corlib.Boolean, corlib.String, corlib.String));
     var strTrim       = new MemberReference(stringType,    "Trim",
@@ -229,9 +227,8 @@ void PatchLidgren(string path, string backup)
         new(CilOpCodes.Call,     strEquals),
         new(CilOpCodes.Brfalse,  skipLabel),
 
-        // configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigFileName)
-        new(CilOpCodes.Call,     getCurDomain),
-        new(CilOpCodes.Callvirt, getBaseDir),
+        // configPath = Path.Combine(Directory.GetCurrentDirectory(), ConfigFileName)
+        new(CilOpCodes.Call,     getCurDir),
         new(CilOpCodes.Ldstr,    ConfigFileName),
         new(CilOpCodes.Call,     pathCombine),
         new(CilOpCodes.Stloc,    pathVar),
