@@ -498,8 +498,72 @@ void NetDebug()
         cBody.Instructions.OptimizeMacros();
     }
 
+    var objToString = new MemberReference(
+        new TypeReference(module, scope, "System", "Object"), "ToString",
+        MethodSignature.CreateInstance(corlib.String));
+
+    // Patch NetPeer.Connect(IPEndPoint) — log P2P connection attempts
+    var connectEp = netPeer.Methods.FirstOrDefault(m =>
+        m.Name == "Connect" &&
+        m.Parameters.Count >= 1 &&
+        m.Parameters[0].ParameterType.IsTypeOf("System.Net", "IPEndPoint"));
+
+    if (connectEp?.CilMethodBody is not null)
+    {
+        var epBody   = connectEp.CilMethodBody;
+        var epStrVar = new CilLocalVariable(corlib.String);
+        epBody.LocalVariables.Add(epStrVar);
+
+        var epPrefix = new List<CilInstruction>
+        {
+            new(CilOpCodes.Ldarg,    connectEp.Parameters[0]),
+            new(CilOpCodes.Callvirt, objToString),
+            new(CilOpCodes.Stloc,   epStrVar),
+            new(CilOpCodes.Ldstr,   "network_debug.log"),
+            new(CilOpCodes.Ldstr,   "[connect-ep] "),
+            new(CilOpCodes.Ldloc,   epStrVar),
+            new(CilOpCodes.Ldstr,   "\n"),
+            new(CilOpCodes.Call,    concat3),
+            new(CilOpCodes.Call,    appendAll),
+        };
+
+        for (int i = 0; i < epPrefix.Count; i++)
+            epBody.Instructions.Insert(i, epPrefix[i]);
+        epBody.Instructions.OptimizeMacros();
+    }
+
+    // Patch NetPeer.SendUnconnectedMessage(NetOutgoingMessage, IPEndPoint) — log master server traffic
+    var sendUnconnected = netPeer.Methods.FirstOrDefault(m =>
+        m.Name == "SendUnconnectedMessage" &&
+        m.Parameters.Count >= 2 &&
+        m.Parameters[1].ParameterType.IsTypeOf("System.Net", "IPEndPoint"));
+
+    if (sendUnconnected?.CilMethodBody is not null)
+    {
+        var suBody   = sendUnconnected.CilMethodBody;
+        var suStrVar = new CilLocalVariable(corlib.String);
+        suBody.LocalVariables.Add(suStrVar);
+
+        var suPrefix = new List<CilInstruction>
+        {
+            new(CilOpCodes.Ldarg,    sendUnconnected.Parameters[1]),
+            new(CilOpCodes.Callvirt, objToString),
+            new(CilOpCodes.Stloc,   suStrVar),
+            new(CilOpCodes.Ldstr,   "network_debug.log"),
+            new(CilOpCodes.Ldstr,   "[send-unconnected] → "),
+            new(CilOpCodes.Ldloc,   suStrVar),
+            new(CilOpCodes.Ldstr,   "\n"),
+            new(CilOpCodes.Call,    concat3),
+            new(CilOpCodes.Call,    appendAll),
+        };
+
+        for (int i = 0; i < suPrefix.Count; i++)
+            suBody.Instructions.Insert(i, suPrefix[i]);
+        suBody.Instructions.OptimizeMacros();
+    }
+
     module.Write(dll);
-    Console.WriteLine("Network debug enabled. Resolve and Connect calls logged to network_debug.log in the game folder.");
+    Console.WriteLine("Network debug enabled. Resolve, Connect, and SendUnconnectedMessage calls logged to network_debug.log.");
 }
 
 void UnNetDebug()
