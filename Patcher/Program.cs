@@ -101,8 +101,12 @@ void PatchLidgren(string path, string backup)
     // ---- method references -------------------------------------------------
     var fileExists    = new MemberReference(fileType, "Exists",
         MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
+    var appendAllText = new MemberReference(fileType, "AppendAllText",
+        MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String));
     var readAllLines  = new MemberReference(fileType, "ReadAllLines",
         MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
+    var strConcat3    = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String));
     var pathCombine   = new MemberReference(pathType, "Combine",
         MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String));
     var getCurDir     = new MemberReference(dirType,  "GetCurrentDirectory",
@@ -170,6 +174,13 @@ void PatchLidgren(string path, string backup)
     hi.Add(CilOpCodes.Ldc_I4_S, (sbyte)35); // '#'
     hi.Add(CilOpCodes.Beq,      nextLabel);
 
+    // File.AppendAllText("network_debug.log", "[master] " + t + "\n")
+    hi.Add(CilOpCodes.Ldstr,    "network_debug.log");
+    hi.Add(CilOpCodes.Ldstr,    "[master] ");
+    hi.Add(CilOpCodes.Ldloc,    tVar);
+    hi.Add(CilOpCodes.Ldstr,    "\n");
+    hi.Add(CilOpCodes.Call,     strConcat3);
+    hi.Add(CilOpCodes.Call,     appendAllText);
     // return t
     hi.Add(CilOpCodes.Ldloc,    tVar);
     hi.Add(CilOpCodes.Ret);
