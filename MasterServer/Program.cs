@@ -112,8 +112,8 @@ void OnListRequest(NetIncomingMessage msg)
         var res = peer.CreateMessage();
         res.Write(true);             // hasServer
         res.Write(host.Id);
-        res.Write(host.ExternalIP);
         res.Write(host.InternalIP);
+        res.Write(host.ExternalIP);
         res.Write(host.ServerInfoJson);
         res.Write("");               // country — unknown
         peer.SendUnconnectedMessage(res, client);
