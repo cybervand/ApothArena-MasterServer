@@ -114,11 +114,21 @@ void OnListRequest(NetIncomingMessage msg)
         res.Write(host.Id);
         res.Write(host.InternalIP);
         res.Write(host.ExternalIP);
-        res.Write(host.ServerInfoJson);
+        res.Write(FixServerInfoIp(host.ServerInfoJson, host.ExternalIP.Address.ToString()));
         res.Write("");               // country — unknown
         peer.SendUnconnectedMessage(res, client);
     }
     Console.WriteLine($"[list] Sent {hosts.Count} server(s) to {client}");
+}
+
+string FixServerInfoIp(string json, string externalIp)
+{
+    var start = json.IndexOf("\"IPAddress\":\"");
+    if (start < 0) return json;
+    var valueStart = start + 13;
+    var valueEnd   = json.IndexOf('"', valueStart);
+    if (valueEnd < 0) return json;
+    return json[..valueStart] + externalIp + json[valueEnd..];
 }
 
 IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback)
