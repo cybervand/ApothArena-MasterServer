@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="MasterServer/MasterServer.csproj" />
+  <Project Path="Patcher/Patcher.csproj" />
+</Solution>
