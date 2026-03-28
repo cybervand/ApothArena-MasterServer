@@ -64,6 +64,8 @@ void OnRegister(NetIncomingMessage msg)
     var json      = msg.ReadString();
     var externalIP = msg.SenderEndPoint;
 
+    internalIP = Sanitize(internalIP, externalIP);
+
     bool isNew = !hosts.ContainsKey(id);
     hosts[id] = new HostEntry(id, internalIP, externalIP, json, DateTime.UtcNow);
 
@@ -83,7 +85,7 @@ void OnQuit(NetIncomingMessage msg)
 
 void OnNatIntro(NetIncomingMessage msg)
 {
-    var clientInternal = msg.ReadIPEndPoint();
+    var clientInternal = Sanitize(msg.ReadIPEndPoint(), msg.SenderEndPoint);
     var hostId         = msg.ReadInt64();
     var token          = msg.ReadString();
     var clientExternal = msg.SenderEndPoint;
@@ -117,6 +119,13 @@ void OnListRequest(NetIncomingMessage msg)
         peer.SendUnconnectedMessage(res, client);
     }
     Console.WriteLine($"[list] Sent {hosts.Count} server(s) to {client}");
+}
+
+IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback)
+{
+    var b = ep.Address.GetAddressBytes();
+    bool linkLocal = b.Length == 4 && b[0] == 169 && b[1] == 254;
+    return linkLocal ? new IPEndPoint(fallback.Address, ep.Port) : ep;
 }
 
 record HostEntry(long Id, IPEndPoint InternalIP, IPEndPoint ExternalIP, string ServerInfoJson, DateTime LastSeen);
