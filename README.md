@@ -111,6 +111,29 @@ port forwarding on their end.
 docker logs apotharena-masterserver -f
 ```
 
+### Diagnostic probe
+
+You can test whether the master server is reachable without launching the game by
+using the `MasterServerProbe` tool.
+
+Build and run:
+
+```bash
+dotnet run --project MasterServerProbe -- ping your-server.example.com
+dotnet run --project MasterServerProbe -- status your-server.example.com
+```
+
+What it does:
+
+- `ping` checks that UDP `14343` is reachable and reports round-trip time
+- `status` returns uptime, tracked host count, and the current registered hosts
+
+Useful options:
+
+- Pass a custom port after the host: `status your-server.example.com 14343`
+- Increase timeout: `--timeout=5000`
+- Skip host details: `--no-hosts`
+
 ---
 
 ## Building from source

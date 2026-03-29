@@ -91,11 +91,10 @@ void PatchLidgren(string path, string backup)
     var module = ModuleDefinition.FromFile(path);
     var corlib = module.CorLibTypeFactory;
     var scope  = corlib.CorLibScope;
+    var configPathInGameDir = Path.Combine(Path.GetDirectoryName(path)!, ConfigFileName);
 
     // ---- type references ---------------------------------------------------
     var fileType      = new TypeReference(module, scope, "System.IO", "File");
-    var pathType      = new TypeReference(module, scope, "System.IO", "Path");
-    var dirType       = new TypeReference(module, scope, "System.IO", "Directory");
     var stringType    = new TypeReference(module, scope, "System",    "String");
 
     // ---- method references -------------------------------------------------
@@ -107,10 +106,6 @@ void PatchLidgren(string path, string backup)
         MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
     var strConcat3    = new MemberReference(stringType, "Concat",
         MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String));
-    var pathCombine   = new MemberReference(pathType, "Combine",
-        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String));
-    var getCurDir     = new MemberReference(dirType,  "GetCurrentDirectory",
-        MethodSignature.CreateStatic(corlib.String));
     var strEquals     = new MemberReference(stringType,    "op_Equality",
         MethodSignature.CreateStatic(corlib.Boolean, corlib.String, corlib.String));
     var strTrim       = new MemberReference(stringType,    "Trim",
@@ -238,10 +233,8 @@ void PatchLidgren(string path, string backup)
         new(CilOpCodes.Call,     strEquals),
         new(CilOpCodes.Brfalse,  skipLabel),
 
-        // configPath = Path.Combine(Directory.GetCurrentDirectory(), ConfigFileName)
-        new(CilOpCodes.Call,     getCurDir),
-        new(CilOpCodes.Ldstr,    ConfigFileName),
-        new(CilOpCodes.Call,     pathCombine),
+        // configPath = "<absolute path to game folder>/master_server.txt"
+        new(CilOpCodes.Ldstr,    configPathInGameDir),
         new(CilOpCodes.Stloc,    pathVar),
 
         // if (!File.Exists(configPath)) goto original
@@ -267,6 +260,157 @@ void PatchLidgren(string path, string backup)
         body.Instructions.Insert(i, prefix[i]);
 
     body.Instructions.OptimizeMacros();
+
+    // ---- Inject __GetBestLocalIp: skip APIPA/link-local (169.254.x.x) ---------
+    // If GetMyAddress() returns a link-local address (e.g. Hyper-V virtual adapter),
+    // this helper walks Dns.GetHostAddresses to find the first real IPv4 address.
+    var sysRef = module.AssemblyReferences.FirstOrDefault(r => r.Name == "System");
+    if (sysRef is not null)
+    {
+        var ipAddrRef    = new TypeReference(module, sysRef, "System.Net", "IPAddress");
+        var dnsRef       = new TypeReference(module, sysRef, "System.Net", "Dns");
+        var ipAddrSig    = new TypeDefOrRefSignature(ipAddrRef);
+        var ipAddrArrSig = new SzArrayTypeSignature(ipAddrSig);
+        var byteArrSig   = new SzArrayTypeSignature(corlib.Byte);
+
+        var getAddrBytes = new MemberReference(ipAddrRef, "GetAddressBytes",
+            MethodSignature.CreateInstance(byteArrSig));
+        var dnsHostName  = new MemberReference(dnsRef, "GetHostName",
+            MethodSignature.CreateStatic(corlib.String));
+        var dnsHostAddrs = new MemberReference(dnsRef, "GetHostAddresses",
+            MethodSignature.CreateStatic(ipAddrArrSig, corlib.String));
+
+        var bestIpHelper = new MethodDefinition("__GetBestLocalIp",
+            MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(ipAddrSig, ipAddrSig));
+
+        var bipBody = new CilMethodBody(bestIpHelper);
+        var bBytes  = new CilLocalVariable(byteArrSig);
+        var bAddrs  = new CilLocalVariable(ipAddrArrSig);
+        var bIdx    = new CilLocalVariable(corlib.Int32);
+        var bAddr   = new CilLocalVariable(ipAddrSig);
+        var bC      = new CilLocalVariable(byteArrSig);
+        bipBody.LocalVariables.Add(bBytes);
+        bipBody.LocalVariables.Add(bAddrs);
+        bipBody.LocalVariables.Add(bIdx);
+        bipBody.LocalVariables.Add(bAddr);
+        bipBody.LocalVariables.Add(bC);
+
+        var loopLbl    = new CilInstructionLabel();
+        var checkLbl   = new CilInstructionLabel();
+        var nextLbl    = new CilInstructionLabel();
+        var retAddrLbl = new CilInstructionLabel();
+        var retOrigLbl = new CilInstructionLabel();
+        var bi         = bipBody.Instructions;
+
+        // b = original.GetAddressBytes()
+        bi.Add(CilOpCodes.Ldarg_0);
+        bi.Add(CilOpCodes.Callvirt, getAddrBytes);
+        bi.Add(CilOpCodes.Stloc, bBytes);
+        // if (b.Length != 4) goto retOrig
+        bi.Add(CilOpCodes.Ldloc,   bBytes);
+        bi.Add(CilOpCodes.Ldlen);
+        bi.Add(CilOpCodes.Conv_I4);
+        bi.Add(CilOpCodes.Ldc_I4,  4);
+        bi.Add(CilOpCodes.Bne_Un,  retOrigLbl);
+        // if (b[0] != 169) goto retOrig
+        bi.Add(CilOpCodes.Ldloc,   bBytes);
+        bi.Add(CilOpCodes.Ldc_I4_0);
+        bi.Add(CilOpCodes.Ldelem_U1);
+        bi.Add(CilOpCodes.Ldc_I4,  169);
+        bi.Add(CilOpCodes.Bne_Un,  retOrigLbl);
+        // if (b[1] != 254) goto retOrig
+        bi.Add(CilOpCodes.Ldloc,   bBytes);
+        bi.Add(CilOpCodes.Ldc_I4_1);
+        bi.Add(CilOpCodes.Ldelem_U1);
+        bi.Add(CilOpCodes.Ldc_I4,  254);
+        bi.Add(CilOpCodes.Bne_Un,  retOrigLbl);
+        // addrs = Dns.GetHostAddresses(Dns.GetHostName())
+        bi.Add(CilOpCodes.Call,    dnsHostName);
+        bi.Add(CilOpCodes.Call,    dnsHostAddrs);
+        bi.Add(CilOpCodes.Stloc,   bAddrs);
+        // i = 0; goto check
+        bi.Add(CilOpCodes.Ldc_I4_0);
+        bi.Add(CilOpCodes.Stloc,   bIdx);
+        bi.Add(CilOpCodes.Br,      checkLbl);
+
+        // loop: addr = addrs[i]
+        var bipLoopStart = new CilInstruction(CilOpCodes.Ldloc, bAddrs);
+        bi.Add(bipLoopStart); loopLbl.Instruction = bipLoopStart;
+        bi.Add(CilOpCodes.Ldloc,   bIdx);
+        bi.Add(CilOpCodes.Ldelem_Ref);
+        bi.Add(CilOpCodes.Stloc,   bAddr);
+        // c = addr.GetAddressBytes()
+        bi.Add(CilOpCodes.Ldloc,   bAddr);
+        bi.Add(CilOpCodes.Callvirt, getAddrBytes);
+        bi.Add(CilOpCodes.Stloc,   bC);
+        // if (c.Length != 4) goto next   [skip IPv6]
+        bi.Add(CilOpCodes.Ldloc,   bC);
+        bi.Add(CilOpCodes.Ldlen);
+        bi.Add(CilOpCodes.Conv_I4);
+        bi.Add(CilOpCodes.Ldc_I4,  4);
+        bi.Add(CilOpCodes.Bne_Un,  nextLbl);
+        // if (c[0] == 127) goto next   [loopback]
+        bi.Add(CilOpCodes.Ldloc,   bC);
+        bi.Add(CilOpCodes.Ldc_I4_0);
+        bi.Add(CilOpCodes.Ldelem_U1);
+        bi.Add(CilOpCodes.Ldc_I4,  127);
+        bi.Add(CilOpCodes.Beq,     nextLbl);
+        // if (c[0] != 169) goto retAddr  [good non-169 address]
+        bi.Add(CilOpCodes.Ldloc,   bC);
+        bi.Add(CilOpCodes.Ldc_I4_0);
+        bi.Add(CilOpCodes.Ldelem_U1);
+        bi.Add(CilOpCodes.Ldc_I4,  169);
+        bi.Add(CilOpCodes.Bne_Un,  retAddrLbl);
+        // c[0]==169: if (c[1] == 254) goto next  [still link-local]
+        bi.Add(CilOpCodes.Ldloc,   bC);
+        bi.Add(CilOpCodes.Ldc_I4_1);
+        bi.Add(CilOpCodes.Ldelem_U1);
+        bi.Add(CilOpCodes.Ldc_I4,  254);
+        bi.Add(CilOpCodes.Beq,     nextLbl);
+        // retAddr: return addr
+        var retAddrStart = new CilInstruction(CilOpCodes.Ldloc, bAddr);
+        bi.Add(retAddrStart); retAddrLbl.Instruction = retAddrStart;
+        bi.Add(CilOpCodes.Ret);
+        // next: i++
+        var bipNextStart = new CilInstruction(CilOpCodes.Ldloc, bIdx);
+        bi.Add(bipNextStart); nextLbl.Instruction = bipNextStart;
+        bi.Add(CilOpCodes.Ldc_I4_1);
+        bi.Add(CilOpCodes.Add);
+        bi.Add(CilOpCodes.Stloc, bIdx);
+        // check: if (i < addrs.Length) goto loop
+        var bipCheckStart = new CilInstruction(CilOpCodes.Ldloc, bIdx);
+        bi.Add(bipCheckStart); checkLbl.Instruction = bipCheckStart;
+        bi.Add(CilOpCodes.Ldloc,  bAddrs);
+        bi.Add(CilOpCodes.Ldlen);
+        bi.Add(CilOpCodes.Conv_I4);
+        bi.Add(CilOpCodes.Blt,    loopLbl);
+        // retOrig: return original
+        var retOrigStart = new CilInstruction(CilOpCodes.Ldarg_0);
+        bi.Add(retOrigStart); retOrigLbl.Instruction = retOrigStart;
+        bi.Add(CilOpCodes.Ret);
+
+        bipBody.Instructions.OptimizeMacros();
+        bestIpHelper.CilMethodBody = bipBody;
+        netUtility.Methods.Add(bestIpHelper);
+
+        // Wrap every ret in GetMyAddress with __GetBestLocalIp
+        var getMyAddrMethod = netUtility.Methods.FirstOrDefault(m =>
+            m.Name == "GetMyAddress" && m.CilMethodBody is not null);
+        if (getMyAddrMethod is not null)
+        {
+            var gaI    = getMyAddrMethod.CilMethodBody!.Instructions;
+            var gaRets = Enumerable.Range(0, gaI.Count)
+                .Where(i => gaI[i].OpCode == CilOpCodes.Ret)
+                .OrderByDescending(i => i)
+                .ToList();
+            foreach (int ri in gaRets)
+                gaI.Insert(ri, new CilInstruction(CilOpCodes.Call, bestIpHelper));
+            getMyAddrMethod.CilMethodBody!.Instructions.OptimizeMacros();
+            Console.WriteLine("Injected local-IP fix into NetUtility.GetMyAddress.");
+        }
+    }
+
     module.Write(path);
 
     Console.WriteLine($"Patched {LidgrenDllName} — injected config file lookup into NetUtility.Resolve.");
@@ -562,8 +706,104 @@ void NetDebug()
         suBody.Instructions.OptimizeMacros();
     }
 
+    // Patch GetMyAddress — log the local IP Lidgren picks for this machine.
+    // Inserts logging before every ret so all return paths are covered.
+    var getMyAddr = netUtility.Methods.FirstOrDefault(m =>
+        m.Name == "GetMyAddress" && m.CilMethodBody is not null);
+
+    if (getMyAddr is not null)
+    {
+        var gaBody   = getMyAddr.CilMethodBody!;
+        var gaStrVar = new CilLocalVariable(corlib.String);
+        gaBody.LocalVariables.Add(gaStrVar);
+
+        var instrs     = gaBody.Instructions;
+        var retIndices = Enumerable.Range(0, instrs.Count)
+            .Where(i => instrs[i].OpCode == CilOpCodes.Ret)
+            .OrderByDescending(i => i)
+            .ToList();
+
+        foreach (int retIdx in retIndices)
+        {
+            var retInstr = instrs[retIdx];
+            var skipLog  = new CilInstructionLabel();
+            skipLog.Instruction = retInstr;
+
+            // Stack before ret: [IPAddress]. dup + brfalse skips log on null.
+            var logCode = new List<CilInstruction>
+            {
+                new(CilOpCodes.Dup),
+                new(CilOpCodes.Brfalse, skipLog),
+                new(CilOpCodes.Dup),
+                new(CilOpCodes.Callvirt, objToString),
+                new(CilOpCodes.Stloc,    gaStrVar),
+                new(CilOpCodes.Ldstr,    "network_debug.log"),
+                new(CilOpCodes.Ldstr,    "[local-ip] "),
+                new(CilOpCodes.Ldloc,    gaStrVar),
+                new(CilOpCodes.Ldstr,    "\n"),
+                new(CilOpCodes.Call,     concat3),
+                new(CilOpCodes.Call,     appendAll),
+            };
+
+            for (int i = 0; i < logCode.Count; i++)
+                instrs.Insert(retIdx + i, logCode[i]);
+        }
+        gaBody.Instructions.OptimizeMacros();
+    }
+
+    // Patch NetConnection.SetStatus — log every connection state change with endpoint.
+    var netConn     = module.TopLevelTypes.FirstOrDefault(t => t.Name == "NetConnection");
+    var setStatus   = netConn?.Methods.FirstOrDefault(m =>
+        m.Name == "SetStatus" && m.Parameters.Count >= 1 && m.CilMethodBody is not null);
+    var getRemoteEp = netConn?.Methods.FirstOrDefault(m => m.Name == "get_RemoteEndPoint");
+    var statusEnum  = module.TopLevelTypes.FirstOrDefault(t => t.Name == "NetConnectionStatus");
+
+    if (setStatus is not null && getRemoteEp is not null && statusEnum is not null)
+    {
+        var ssBody      = setStatus.CilMethodBody!;
+        var ssEpVar     = new CilLocalVariable(corlib.String);
+        var ssStatusVar = new CilLocalVariable(corlib.String);
+        ssBody.LocalVariables.Add(ssEpVar);
+        ssBody.LocalVariables.Add(ssStatusVar);
+
+        var ssPrefix = new List<CilInstruction>
+        {
+            // epStr = this.RemoteEndPoint.ToString()
+            new(CilOpCodes.Ldarg_0),
+            new(CilOpCodes.Callvirt, getRemoteEp),
+            new(CilOpCodes.Callvirt, objToString),
+            new(CilOpCodes.Stloc,    ssEpVar),
+            // statusStr = ((NetConnectionStatus)arg0).ToString()
+            new(CilOpCodes.Ldarg,    setStatus.Parameters[0]),
+            new(CilOpCodes.Box,      statusEnum),
+            new(CilOpCodes.Callvirt, objToString),
+            new(CilOpCodes.Stloc,    ssStatusVar),
+            // File.AppendAllText("network_debug.log", "[conn-status] " + ep + " -> " + status + "\n")
+            new(CilOpCodes.Ldstr,    "network_debug.log"),
+            new(CilOpCodes.Ldstr,    "[conn-status] "),
+            new(CilOpCodes.Ldloc,    ssEpVar),
+            new(CilOpCodes.Ldstr,    " -> "),
+            new(CilOpCodes.Call,     concat3),
+            new(CilOpCodes.Ldloc,    ssStatusVar),
+            new(CilOpCodes.Ldstr,    "\n"),
+            new(CilOpCodes.Call,     concat3),
+            new(CilOpCodes.Call,     appendAll),
+        };
+
+        for (int i = 0; i < ssPrefix.Count; i++)
+            ssBody.Instructions.Insert(i, ssPrefix[i]);
+        ssBody.Instructions.OptimizeMacros();
+    }
+
     module.Write(dll);
-    Console.WriteLine("Network debug enabled. Resolve, Connect, and SendUnconnectedMessage calls logged to network_debug.log.");
+    Console.WriteLine("Network debug enabled. Logged to network_debug.log:");
+    Console.WriteLine("  [master]           master server IP from config file");
+    Console.WriteLine("  [resolve]          DNS/IP resolution");
+    Console.WriteLine("  [local-ip]         local IP Lidgren detected for this machine");
+    Console.WriteLine("  [connect]          connection attempt (host:port)");
+    Console.WriteLine("  [connect-ep]       connection attempt (IPEndPoint, P2P)");
+    Console.WriteLine("  [send-unconnected] unconnected packet sent to master server");
+    Console.WriteLine("  [conn-status]      connection state changes");
 }
 
 void UnNetDebug()
@@ -587,7 +827,7 @@ void PrintUsage()
     Console.WriteLine("  ApotheonArenaMPpatch.exe restore    restore original Lidgren.Network.dll");
     Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose   inject crash logger into ApotheonArena.exe");
     Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose remove crash logger");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log Resolve/Connect calls to network_debug.log");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log networking calls to network_debug.log");
     Console.WriteLine("  ApotheonArenaMPpatch.exe unnetdebug remove network debug logging");
     Console.WriteLine();
     Console.WriteLine($"  After patching, edit {ConfigFileName} in the game folder.");

@@ -19,3 +19,9 @@ Patcher/publish-linux.zip
 !MasterServer/**
 MasterServer/bin/
 MasterServer/obj/
+
+# MasterServer probe source
+!MasterServerProbe/
+!MasterServerProbe/**
+MasterServerProbe/bin/
+MasterServerProbe/obj/
