@@ -216,6 +216,15 @@ void OnListRequest(NetIncomingMessage msg)
     var client = msg.SenderEndPoint;
     Log("list", $"List request from {DescribeEndPoint(client)} hostsAvailable={hosts.Count}");
 
+    if (hosts.Count == 0)
+    {
+        var empty = peer.CreateMessage();
+        empty.Write(false);
+        peer.SendUnconnectedMessage(empty, client);
+        Log("list", $"Sent empty list marker to {DescribeEndPoint(client)}");
+        return;
+    }
+
     int sent = 0;
     foreach (var host in hosts.Values)
     {

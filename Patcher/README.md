@@ -20,6 +20,8 @@ No extra software needed. The patcher is a standalone `.exe`.
    ```
    ApotheonArenaMPpatch.exe
    ```
+   This opens a small menu where you can choose `Patch game`, `Restore`,
+   `Enable network debug`, or `Disable network debug`.
    > To open Command Prompt here: hold Shift, right-click inside the folder,
    > select **"Open PowerShell window here"** or **"Open command window here"**
 
@@ -46,7 +48,8 @@ ApotheonArenaMPpatch.exe restore
 ```
 
 This restores `Lidgren.Network.dll` from the backup that was saved when
-you first ran the patcher. You can safely delete `ApotheonArenaMPpatch.exe` and
+you first ran the patcher, and also restores the server-browser empty-list patch.
+You can safely delete `ApotheonArenaMPpatch.exe` and
 `master_server.txt` afterwards.
 
 ---

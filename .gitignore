@@ -25,3 +25,9 @@ MasterServer/obj/
 !MasterServerProbe/**
 MasterServerProbe/bin/
 MasterServerProbe/obj/
+
+# MasterServer lab source
+!MasterServerLab/
+!MasterServerLab/**
+MasterServerLab/bin/
+MasterServerLab/obj/

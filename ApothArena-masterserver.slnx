@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="MasterServer/MasterServer.csproj" />
+  <Project Path="MasterServerLab/MasterServerLab.csproj" />
   <Project Path="MasterServerProbe/MasterServerProbe.csproj" />
   <Project Path="Patcher/Patcher.csproj" />
 </Solution>

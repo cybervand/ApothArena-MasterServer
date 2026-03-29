@@ -134,6 +134,42 @@ Useful options:
 - Increase timeout: `--timeout=5000`
 - Skip host details: `--no-hosts`
 
+### Protocol lab
+
+You can also simulate a lightweight host, browser, or joiner without launching
+the full game by using `MasterServerLab`.
+
+Examples:
+
+```bash
+dotnet run --project MasterServerLab -- host your-server.example.com --duration=30 --host-id=12345 --name="Lab Host"
+dotnet run --project MasterServerLab -- browse your-server.example.com --timeout=3000
+dotnet run --project MasterServerLab -- join your-server.example.com --host-id=12345 --timeout=5000
+```
+
+Useful options:
+
+- `--local-ip=<ip>` to bind the simulated client to a specific local address
+- `--report-ip=<ip>` and `--report-port=<port>` to deliberately lie about the
+  internal endpoint and reproduce bad-adapter scenarios
+- `--heartbeat-ms=<ms>` to change host heartbeat frequency
+- `--token=<value>` to force a known NAT-introduction token during tests
+- `--scenario=<preset>` to quickly replay common endpoint cases
+
+List built-in presets:
+
+```bash
+dotnet run --project MasterServerLab -- scenarios
+```
+
+Preset examples:
+
+```bash
+dotnet run --project MasterServerLab -- host your-server.example.com --scenario=bad-link-local --host-id=12345
+dotnet run --project MasterServerLab -- host your-server.example.com --scenario=tailscale --host-id=12345
+dotnet run --project MasterServerLab -- join your-server.example.com --scenario=private-lan --host-id=12345
+```
+
 ---
 
 ## Building from source
