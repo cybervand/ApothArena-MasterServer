@@ -159,16 +159,20 @@ void OnRegister(NetIncomingMessage msg)
     var reportedInternal = msg.ReadIPEndPoint();
     var id = msg.ReadInt64();
     var json = msg.ReadString();
+    var reportedExternalRaw = TryReadTrailingString(msg);
+    var reportedExternal = TryParseEndPoint(reportedExternalRaw, sender.Port);
     var effectiveInternal = Sanitize(reportedInternal, sender);
+    var effectiveExternal = reportedExternal ?? sender;
+    var externalSource = reportedExternal is null ? "sender" : "reported";
     var extraBytes = msg.LengthBytes - msg.PositionInBytes;
     bool sanitized = !EndPointsEqual(reportedInternal, effectiveInternal);
     bool isNew = !hosts.ContainsKey(id);
 
-    hosts[id] = new HostEntry(id, effectiveInternal, sender, json, DateTime.UtcNow);
+    hosts[id] = new HostEntry(id, effectiveInternal, effectiveExternal, json, DateTime.UtcNow);
 
     Log(
         isNew ? "register" : "heartbeat",
-        $"{(isNew ? "New host" : "Refresh")} id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} effectiveInt={DescribeEndPoint(effectiveInternal)} sanitized={sanitized} jsonLength={json.Length} extraBytes={extraBytes}");
+        $"{(isNew ? "New host" : "Refresh")} id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} effectiveInt={DescribeEndPoint(effectiveInternal)} reportedExt={Quote(reportedExternalRaw)} effectiveExt={DescribeEndPoint(effectiveExternal)} extSource={externalSource} sanitized={sanitized} jsonLength={json.Length} extraBytes={extraBytes}");
     Log("register", $"Server info for id={id}: {json}");
     LogHosts(isNew ? "after-register" : "after-heartbeat");
 }
@@ -437,6 +441,44 @@ string SafeReadRemainingString(NetIncomingMessage msg)
     {
         return "<unreadable>";
     }
+}
+
+string? TryReadTrailingString(NetIncomingMessage msg)
+{
+    if (msg.LengthBytes - msg.PositionInBytes <= 0)
+        return null;
+
+    try
+    {
+        var value = msg.ReadString();
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+IPEndPoint? TryParseEndPoint(string? raw, int defaultPort)
+{
+    if (string.IsNullOrWhiteSpace(raw))
+        return null;
+
+    var text = raw.Trim();
+    string ipPart = text;
+    int port = defaultPort;
+
+    int firstColon = text.IndexOf(':');
+    int lastColon = text.LastIndexOf(':');
+    bool looksLikeIpv4WithPort = firstColon >= 0 && firstColon == lastColon && lastColon < text.Length - 1;
+    if (looksLikeIpv4WithPort)
+    {
+        ipPart = text[..lastColon];
+        if (!int.TryParse(text[(lastColon + 1)..], out port) || port <= 0 || port > 65535)
+            port = defaultPort;
+    }
+
+    return IPAddress.TryParse(ipPart, out var addr) ? new IPEndPoint(addr, port) : null;
 }
 
 string Quote(string? value)

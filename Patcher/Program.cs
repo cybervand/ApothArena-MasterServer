@@ -5,18 +5,32 @@ using AsmResolver.DotNet.Signatures.Types;
 using AsmResolver.PE.DotNet.Cil;
 using AsmResolver.PE.DotNet.Metadata.Tables.Rows;
 
-// Patches Lidgren.Network.dll's NetUtility.Resolve() to read the master server
-// address from master_server.txt instead of using the hardcoded IP.
+// Patches Apotheon Arena to read the master server address from
+// master_server.txt instead of using the hardcoded IP.
 // Any IP or hostname of any length is supported.
 
 const string OriginalIp     = "50.19.227.23";
 const string LidgrenDllName = "Lidgren.Network.dll";
 const string ExeName        = "ApotheonArena.exe";
 const string ConfigFileName = "master_server.txt";
+const string LocalHostIpFileName = "local_host_ip.txt";
+const string PublicHostIpFileName = "public_host_ip.txt";
 
 if (args.Length == 0)
 {
     RunInteractiveMenu();
+    return;
+}
+
+if (args.Length >= 2 && string.Equals(args[0], "inspect-type", StringComparison.OrdinalIgnoreCase))
+{
+    InspectType(args[1]);
+    return;
+}
+
+if (args.Length >= 3 && string.Equals(args[0], "inspect-method", StringComparison.OrdinalIgnoreCase))
+{
+    InspectMethod(args[1], args[2]);
     return;
 }
 
@@ -36,17 +50,22 @@ bool TryExecuteCommand(string command)
         case "patch":
             Patch();
             return true;
+        case "8":
+        case "patch-basic":
+        case "patch-noroute":
+            Patch(includeRouteAwareLocalIpFix: false);
+            return true;
         case "2":
         case "restore":
             Restore();
             return true;
         case "3":
         case "netdebug":
-            NetDebug();
+            SafeNetDebug();
             return true;
         case "4":
         case "unnetdebug":
-            UnNetDebug();
+            SafeUnNetDebug();
             return true;
         case "5":
         case "diagnose":
@@ -77,8 +96,9 @@ void RunInteractiveMenu()
     Console.WriteLine("  2. Restore original files");
     Console.WriteLine("  3. Enable network debug");
     Console.WriteLine("  4. Disable network debug");
-    Console.WriteLine("  5. Enable crash diagnose patch");
-    Console.WriteLine("  6. Disable crash diagnose patch");
+    Console.WriteLine("  5. Show external crash watch help");
+    Console.WriteLine("  6. Remove old crash diagnose patch");
+    Console.WriteLine("  8. Patch game without route-aware local-IP fix");
     Console.WriteLine("  0. Exit");
     Console.WriteLine();
     Console.Write("Select option [1]: ");
@@ -97,42 +117,31 @@ void RunInteractiveMenu()
     }
 }
 
-void Patch()
+void Patch(bool includeRouteAwareLocalIpFix = true)
 {
-    string? dllPath = FindFile(LidgrenDllName);
-    if (dllPath is null)
-    {
-        Console.Error.WriteLine($"Could not find {LidgrenDllName} - place Patcher.exe in the game folder.");
-        Environment.Exit(1);
-        return;
-    }
-
-    string backupPath = dllPath + ".bak";
-    if (File.Exists(backupPath))
-    {
-        Console.Error.WriteLine("Already patched. Run 'Patcher.exe restore' first to unpatch.");
-        Environment.Exit(1);
-        return;
-    }
-
     string? exePath = FindFile(ExeName);
-    string? browserBackupPath = exePath is null ? null : exePath + ".browserbak";
-    if (browserBackupPath is not null && File.Exists(browserBackupPath))
+    if (exePath is null)
+    {
+        Console.Error.WriteLine($"Could not find {ExeName} - place Patcher.exe in the game folder.");
+        Environment.Exit(1);
+        return;
+    }
+
+    string browserBackupPath = exePath + ".browserbak";
+    if (File.Exists(browserBackupPath))
     {
         Console.Error.WriteLine("Browser patch already applied. Run 'Patcher.exe restore' first to unpatch.");
         Environment.Exit(1);
         return;
     }
 
-    PatchLidgren(dllPath, backupPath);
+    if (!includeRouteAwareLocalIpFix)
+        Console.WriteLine("Using executable-only patch path; route-aware Lidgren fix is skipped.");
 
-    if (exePath is not null && browserBackupPath is not null)
-        PatchEmptyServerListMessage(exePath, browserBackupPath);
-    else
-        Console.WriteLine($"Could not find {ExeName} - skipped empty-list browser patch.");
+    PatchGameExecutable(exePath, browserBackupPath, includeRouteAwareLocalIpFix);
 
     // Create master_server.txt in the game folder if it doesn't already exist
-    string gameDir = Path.GetDirectoryName(dllPath)!;
+    string gameDir = Path.GetDirectoryName(exePath)!;
     string configPath = Path.Combine(gameDir, ConfigFileName);
     if (!File.Exists(configPath))
     {
@@ -144,10 +153,770 @@ void Patch()
         Console.WriteLine($"Created {ConfigFileName} in the game folder - edit it to point at your server.");
     }
 
+    string localHostIpPath = Path.Combine(gameDir, LocalHostIpFileName);
+    if (!File.Exists(localHostIpPath))
+    {
+        File.WriteAllText(localHostIpPath,
+            "# Apotheon Arena - Local Host IP Override\n" +
+            "# Optional: set the LAN/VPN IP the game should advertise when hosting.\n" +
+            "# Leave blank to use Lidgren's normal adapter selection.\n" +
+            "# Example:\n" +
+            "# 192.168.1.50\n");
+        Console.WriteLine($"Created optional {LocalHostIpFileName} in the game folder.");
+    }
+
+    string publicHostIpPath = Path.Combine(gameDir, PublicHostIpFileName);
+    if (!File.Exists(publicHostIpPath))
+    {
+        File.WriteAllText(publicHostIpPath,
+            "# Apotheon Arena - Public Host Endpoint Override\n" +
+            "# Optional: set the WAN endpoint the master server should advertise\n" +
+            "# for this host. Use this when the master cannot observe your real\n" +
+            "# public IP (for example, when the master runs on the same LAN as\n" +
+            "# the host and the router preserves the LAN source on hairpin NAT).\n" +
+            "# Format: ip or ip:port  (port defaults to 14242 if omitted).\n" +
+            "# Leave blank to let the master use the observed sender address.\n" +
+            "# Example:\n" +
+            "# 203.0.113.42:14242\n");
+        Console.WriteLine($"Created optional {PublicHostIpFileName} in the game folder.");
+    }
+
     Console.WriteLine("Done! Edit master_server.txt whenever you need to change the server.");
 }
 
-void PatchLidgren(string path, string backup)
+void PatchGameExecutable(string exePath, string backup, bool includeLocalHostIpOverride)
+{
+    File.Copy(exePath, backup);
+
+    var module = ModuleDefinition.FromFile(exePath);
+    ApplyMasterServerRedirectPatch(module, exePath);
+    if (includeLocalHostIpOverride)
+        ApplyGameLocalHostIpOverridePatch(module, exePath);
+    ApplyAdvertisedExternalEndpointPatch(module, exePath);
+    ApplyEmptyServerListMessagePatch(module);
+    module.Write(exePath);
+
+    Console.WriteLine("Patched ApotheonArena.exe — redirected master server lookups to master_server.txt.");
+    if (includeLocalHostIpOverride)
+        Console.WriteLine($"Patched ApotheonArena.exe — host registration now honors optional {LocalHostIpFileName}.");
+    Console.WriteLine("Patched ApotheonArena.exe — empty server lists now show 'No games available.'");
+}
+
+void ApplyMasterServerRedirectPatch(ModuleDefinition module, string exePath)
+{
+    string configPathInGameDir = Path.Combine(Path.GetDirectoryName(exePath)!, ConfigFileName);
+    var corlib = module.CorLibTypeFactory;
+    var scope  = corlib.CorLibScope;
+
+    var fileType   = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+
+    var fileExists = new MemberReference(fileType, "Exists",
+        MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
+    var readAllLines = new MemberReference(fileType, "ReadAllLines",
+        MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
+    var strTrim = new MemberReference(stringType, "Trim",
+        MethodSignature.CreateInstance(corlib.String));
+    var strGetLength = new MemberReference(stringType, "get_Length",
+        MethodSignature.CreateInstance(corlib.Int32));
+    var strGetChars = new MemberReference(stringType, "get_Chars",
+        MethodSignature.CreateInstance(corlib.Char, corlib.Int32));
+
+    var networkType = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Network");
+    var helper = new MethodDefinition("__GetMasterServerHost",
+        MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+        MethodSignature.CreateStatic(corlib.String));
+
+    var body = new CilMethodBody(helper);
+    var linesVar = new CilLocalVariable(new SzArrayTypeSignature(corlib.String));
+    var iVar = new CilLocalVariable(corlib.Int32);
+    var lineVar = new CilLocalVariable(corlib.String);
+    body.LocalVariables.Add(linesVar);
+    body.LocalVariables.Add(iVar);
+    body.LocalVariables.Add(lineVar);
+
+    var loopLabel = new CilInstructionLabel();
+    var checkLabel = new CilInstructionLabel();
+    var nextLabel = new CilInstructionLabel();
+    var fallbackLabel = new CilInstructionLabel();
+    var hi = body.Instructions;
+
+    hi.Add(CilOpCodes.Ldstr, configPathInGameDir);
+    hi.Add(CilOpCodes.Call, fileExists);
+    hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+    hi.Add(CilOpCodes.Ldstr, configPathInGameDir);
+    hi.Add(CilOpCodes.Call, readAllLines);
+    hi.Add(CilOpCodes.Stloc, linesVar);
+    hi.Add(CilOpCodes.Ldc_I4_0);
+    hi.Add(CilOpCodes.Stloc, iVar);
+    hi.Add(CilOpCodes.Br, checkLabel);
+
+    var loopStart = new CilInstruction(CilOpCodes.Ldloc, linesVar);
+    hi.Add(loopStart);
+    loopLabel.Instruction = loopStart;
+    hi.Add(CilOpCodes.Ldloc, iVar);
+    hi.Add(CilOpCodes.Ldelem_Ref);
+    hi.Add(CilOpCodes.Callvirt, strTrim);
+    hi.Add(CilOpCodes.Stloc, lineVar);
+    hi.Add(CilOpCodes.Ldloc, lineVar);
+    hi.Add(CilOpCodes.Callvirt, strGetLength);
+    hi.Add(CilOpCodes.Ldc_I4_0);
+    hi.Add(CilOpCodes.Ble, nextLabel);
+    hi.Add(CilOpCodes.Ldloc, lineVar);
+    hi.Add(CilOpCodes.Ldc_I4_0);
+    hi.Add(CilOpCodes.Callvirt, strGetChars);
+    hi.Add(CilOpCodes.Ldc_I4_S, (sbyte)35);
+    hi.Add(CilOpCodes.Beq, nextLabel);
+    hi.Add(CilOpCodes.Ldloc, lineVar);
+    hi.Add(CilOpCodes.Ret);
+
+    var nextStart = new CilInstruction(CilOpCodes.Ldloc, iVar);
+    hi.Add(nextStart);
+    nextLabel.Instruction = nextStart;
+    hi.Add(CilOpCodes.Ldc_I4_1);
+    hi.Add(CilOpCodes.Add);
+    hi.Add(CilOpCodes.Stloc, iVar);
+
+    var checkStart = new CilInstruction(CilOpCodes.Ldloc, iVar);
+    hi.Add(checkStart);
+    checkLabel.Instruction = checkStart;
+    hi.Add(CilOpCodes.Ldloc, linesVar);
+    hi.Add(CilOpCodes.Ldlen);
+    hi.Add(CilOpCodes.Conv_I4);
+    hi.Add(CilOpCodes.Blt, loopLabel);
+
+    var fallbackStart = new CilInstruction(CilOpCodes.Ldstr, OriginalIp);
+    hi.Add(fallbackStart);
+    fallbackLabel.Instruction = fallbackStart;
+    hi.Add(CilOpCodes.Ret);
+
+    body.Instructions.OptimizeMacros();
+    helper.CilMethodBody = body;
+    networkType.Methods.Add(helper);
+
+    var targets = new[]
+    {
+        ("Apotheon", "Network", "ServerStart"),
+        ("Apotheon", "Network", "ServerQuit"),
+        ("Apotheon", "Network", "ServerUpdate"),
+        ("Apotheon", "Network", "RequestNATIntroduction"),
+        ("Apotheon", "ServerBrowser", "OnInitialize"),
+    };
+
+    int patchedSites = 0;
+    foreach (var (ns, typeName, methodName) in targets)
+    {
+        var type = module.TopLevelTypes.First(t => t.Namespace == ns && t.Name == typeName);
+        foreach (var method in type.Methods.Where(m => m.Name == methodName && m.CilMethodBody is not null))
+        {
+            foreach (var instr in method.CilMethodBody!.Instructions)
+            {
+                if (instr.OpCode == CilOpCodes.Ldstr &&
+                    instr.Operand is string s &&
+                    string.Equals(s, OriginalIp, StringComparison.Ordinal))
+                {
+                    instr.OpCode = CilOpCodes.Call;
+                    instr.Operand = helper;
+                    patchedSites++;
+                }
+            }
+
+            method.CilMethodBody!.Instructions.OptimizeMacros();
+        }
+    }
+
+    if (patchedSites == 0)
+        throw new InvalidOperationException("Could not locate any master-server string call sites in ApotheonArena.exe.");
+}
+
+void ApplyGameLocalHostIpOverridePatch(ModuleDefinition module, string exePath)
+{
+    string localHostIpPath = Path.Combine(Path.GetDirectoryName(exePath)!, LocalHostIpFileName);
+    var corlib = module.CorLibTypeFactory;
+    var scope = corlib.CorLibScope;
+
+    var fileType = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+    var ipAddressType = new TypeReference(module, scope, "System.Net", "IPAddress");
+
+    var fileExists = new MemberReference(fileType, "Exists",
+        MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
+    var readAllLines = new MemberReference(fileType, "ReadAllLines",
+        MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
+    var strTrim = new MemberReference(stringType, "Trim",
+        MethodSignature.CreateInstance(corlib.String));
+    var strGetLength = new MemberReference(stringType, "get_Length",
+        MethodSignature.CreateInstance(corlib.Int32));
+    var strGetChars = new MemberReference(stringType, "get_Chars",
+        MethodSignature.CreateInstance(corlib.Char, corlib.Int32));
+
+    var networkType = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Network");
+    var serverStart = networkType.Methods.First(m => m.Name == "ServerStart" && m.CilMethodBody is not null);
+
+    var getMyAddressCall = serverStart.CilMethodBody!.Instructions.FirstOrDefault(i =>
+        i.OpCode == CilOpCodes.Call &&
+        i.Operand is IMethodDescriptor called &&
+        string.Equals(called.Name?.ToString(), "GetMyAddress", StringComparison.Ordinal));
+
+    if (getMyAddressCall?.Operand is not IMethodDescriptor getMyAddressMethod)
+        throw new InvalidOperationException("Could not locate Lidgren NetUtility.GetMyAddress call in ServerStart.");
+
+    var getMyAddressSig = (MethodSignature)getMyAddressMethod.Signature!;
+    var resolveStringMethod = new MemberReference(
+        (ITypeDefOrRef)getMyAddressMethod.DeclaringType!,
+        "Resolve",
+        MethodSignature.CreateStatic(new TypeDefOrRefSignature(ipAddressType), corlib.String));
+
+    var readConfigHelper = networkType.Methods.FirstOrDefault(m => m.Name == "__ReadConfigLine");
+    if (readConfigHelper is null)
+    {
+        readConfigHelper = new MethodDefinition("__ReadConfigLine",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.String, corlib.String));
+
+        var body = new CilMethodBody(readConfigHelper);
+        var linesVar = new CilLocalVariable(new SzArrayTypeSignature(corlib.String));
+        var indexVar = new CilLocalVariable(corlib.Int32);
+        var lineVar = new CilLocalVariable(corlib.String);
+        body.LocalVariables.Add(linesVar);
+        body.LocalVariables.Add(indexVar);
+        body.LocalVariables.Add(lineVar);
+
+        var loopLabel = new CilInstructionLabel();
+        var checkLabel = new CilInstructionLabel();
+        var nextLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+
+        hi.Add(CilOpCodes.Ldarg_0);
+        hi.Add(CilOpCodes.Call, readAllLines);
+        hi.Add(CilOpCodes.Stloc, linesVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+        hi.Add(CilOpCodes.Br, checkLabel);
+
+        var loopStart = new CilInstruction(CilOpCodes.Ldloc, linesVar);
+        hi.Add(loopStart);
+        loopLabel.Instruction = loopStart;
+        hi.Add(CilOpCodes.Ldloc, indexVar);
+        hi.Add(CilOpCodes.Ldelem_Ref);
+        hi.Add(CilOpCodes.Callvirt, strTrim);
+        hi.Add(CilOpCodes.Stloc, lineVar);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Callvirt, strGetLength);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Ble, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Callvirt, strGetChars);
+        hi.Add(CilOpCodes.Ldc_I4_S, (sbyte)35);
+        hi.Add(CilOpCodes.Beq, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ret);
+
+        var nextStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(nextStart);
+        nextLabel.Instruction = nextStart;
+        hi.Add(CilOpCodes.Ldc_I4_1);
+        hi.Add(CilOpCodes.Add);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+
+        var checkStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(checkStart);
+        checkLabel.Instruction = checkStart;
+        hi.Add(CilOpCodes.Ldloc, linesVar);
+        hi.Add(CilOpCodes.Ldlen);
+        hi.Add(CilOpCodes.Conv_I4);
+        hi.Add(CilOpCodes.Blt, loopLabel);
+        hi.Add(CilOpCodes.Ldnull);
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        readConfigHelper.CilMethodBody = body;
+        networkType.Methods.Add(readConfigHelper);
+    }
+
+    var preferredIpHelper = networkType.Methods.FirstOrDefault(m => m.Name == "__GetAdvertisedLocalIp");
+    if (preferredIpHelper is null)
+    {
+        preferredIpHelper = new MethodDefinition("__GetAdvertisedLocalIp",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(getMyAddressSig.ReturnType, getMyAddressSig.ParameterTypes.ToArray()));
+
+        var body = new CilMethodBody(preferredIpHelper);
+        var configuredHostVar = new CilLocalVariable(corlib.String);
+        var configuredIpVar = new CilLocalVariable(new TypeDefOrRefSignature(ipAddressType));
+        body.LocalVariables.Add(configuredHostVar);
+        body.LocalVariables.Add(configuredIpVar);
+
+        var fallbackLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+        hi.Add(CilOpCodes.Ldstr, localHostIpPath);
+        hi.Add(CilOpCodes.Call, fileExists);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldstr, localHostIpPath);
+        hi.Add(CilOpCodes.Call, readConfigHelper);
+        hi.Add(CilOpCodes.Stloc, configuredHostVar);
+        hi.Add(CilOpCodes.Ldloc, configuredHostVar);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldloc, configuredHostVar);
+        hi.Add(CilOpCodes.Call, resolveStringMethod);
+        hi.Add(CilOpCodes.Stloc, configuredIpVar);
+        hi.Add(CilOpCodes.Ldloc, configuredIpVar);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldarg_0);
+        hi.Add(CilOpCodes.Ldnull);
+        hi.Add(CilOpCodes.Stind_Ref);
+        hi.Add(CilOpCodes.Ldloc, configuredIpVar);
+        hi.Add(CilOpCodes.Ret);
+
+        var fallbackStart = new CilInstruction(CilOpCodes.Ldarg_0);
+        hi.Add(fallbackStart);
+        fallbackLabel.Instruction = fallbackStart;
+        hi.Add(CilOpCodes.Call, getMyAddressMethod);
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        preferredIpHelper.CilMethodBody = body;
+        networkType.Methods.Add(preferredIpHelper);
+    }
+
+    int patchedCalls = 0;
+    foreach (var methodName in new[] { "ServerStart", "ServerUpdate" })
+    {
+        var method = networkType.Methods.First(m => m.Name == methodName && m.CilMethodBody is not null);
+        var instructions = method.CilMethodBody!.Instructions;
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            var instr = instructions[i];
+            if (instr.OpCode != CilOpCodes.Call ||
+                instr.Operand is not IMethodDescriptor called ||
+                !string.Equals(called.Name?.ToString(), "GetMyAddress", StringComparison.Ordinal))
+                continue;
+
+            bool isServerInfoIpAssignment =
+                i + 2 < instructions.Count &&
+                instructions[i + 1].OpCode == CilOpCodes.Callvirt &&
+                instructions[i + 1].Operand is IMethodDescriptor toStringMethod &&
+                string.Equals(toStringMethod.Name?.ToString(), "ToString", StringComparison.Ordinal) &&
+                instructions[i + 2].OpCode == CilOpCodes.Stfld &&
+                instructions[i + 2].Operand is IFieldDescriptor field &&
+                string.Equals(field.Name?.ToString(), "IPAddress", StringComparison.Ordinal) &&
+                string.Equals(field.DeclaringType?.Name?.ToString(), "ServerInfo", StringComparison.Ordinal);
+
+            if (!isServerInfoIpAssignment)
+                continue;
+
+            instr.Operand = preferredIpHelper;
+            patchedCalls++;
+        }
+
+        instructions.OptimizeMacros();
+    }
+
+    if (patchedCalls == 0)
+        throw new InvalidOperationException("Could not patch ServerInfo.IPAddress assignment in Apotheon.Network.");
+}
+
+void ApplyAdvertisedExternalEndpointPatch(ModuleDefinition module, string exePath)
+{
+    string publicHostIpPath = Path.Combine(Path.GetDirectoryName(exePath)!, PublicHostIpFileName);
+    var corlib = module.CorLibTypeFactory;
+    var scope = corlib.CorLibScope;
+
+    var fileType = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+
+    var fileExists = new MemberReference(fileType, "Exists",
+        MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
+    var readAllLines = new MemberReference(fileType, "ReadAllLines",
+        MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
+    var strTrim = new MemberReference(stringType, "Trim",
+        MethodSignature.CreateInstance(corlib.String));
+    var strGetLength = new MemberReference(stringType, "get_Length",
+        MethodSignature.CreateInstance(corlib.Int32));
+    var strGetChars = new MemberReference(stringType, "get_Chars",
+        MethodSignature.CreateInstance(corlib.Char, corlib.Int32));
+
+    var networkType = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Network");
+
+    // Locate the json Write(String) call in ServerStart so we can derive the
+    // NetOutgoingMessage type reference and the msg local slot. The json write
+    // is the first NetOutgoingMessage.Write(String) that follows a Write(Int64)
+    // on the same type within the method.
+    var serverStart = networkType.Methods.First(m => m.Name == "ServerStart" && m.CilMethodBody is not null);
+    var (writeStringIdx, writeStringCall, _) = FindRegisterJsonWrite(serverStart);
+    if (writeStringCall is null)
+        throw new InvalidOperationException("Could not locate json Write(String) call in ServerStart register packet builder.");
+
+    var writeStringMethod = (IMethodDescriptor)writeStringCall.Operand!;
+    var netOutgoingMessageType = (ITypeDefOrRef)writeStringMethod.DeclaringType!;
+
+    var readConfigHelper = networkType.Methods.FirstOrDefault(m => m.Name == "__ReadConfigLine");
+    if (readConfigHelper is null)
+    {
+        readConfigHelper = new MethodDefinition("__ReadConfigLine",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.String, corlib.String));
+
+        var body = new CilMethodBody(readConfigHelper);
+        var linesVar = new CilLocalVariable(new SzArrayTypeSignature(corlib.String));
+        var indexVar = new CilLocalVariable(corlib.Int32);
+        var lineVar = new CilLocalVariable(corlib.String);
+        body.LocalVariables.Add(linesVar);
+        body.LocalVariables.Add(indexVar);
+        body.LocalVariables.Add(lineVar);
+
+        var loopLabel = new CilInstructionLabel();
+        var checkLabel = new CilInstructionLabel();
+        var nextLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+
+        hi.Add(CilOpCodes.Ldarg_0);
+        hi.Add(CilOpCodes.Call, readAllLines);
+        hi.Add(CilOpCodes.Stloc, linesVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+        hi.Add(CilOpCodes.Br, checkLabel);
+
+        var loopStart = new CilInstruction(CilOpCodes.Ldloc, linesVar);
+        hi.Add(loopStart);
+        loopLabel.Instruction = loopStart;
+        hi.Add(CilOpCodes.Ldloc, indexVar);
+        hi.Add(CilOpCodes.Ldelem_Ref);
+        hi.Add(CilOpCodes.Callvirt, strTrim);
+        hi.Add(CilOpCodes.Stloc, lineVar);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Callvirt, strGetLength);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Ble, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Callvirt, strGetChars);
+        hi.Add(CilOpCodes.Ldc_I4_S, (sbyte)35);
+        hi.Add(CilOpCodes.Beq, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ret);
+
+        var nextStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(nextStart);
+        nextLabel.Instruction = nextStart;
+        hi.Add(CilOpCodes.Ldc_I4_1);
+        hi.Add(CilOpCodes.Add);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+
+        var checkStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(checkStart);
+        checkLabel.Instruction = checkStart;
+        hi.Add(CilOpCodes.Ldloc, linesVar);
+        hi.Add(CilOpCodes.Ldlen);
+        hi.Add(CilOpCodes.Conv_I4);
+        hi.Add(CilOpCodes.Blt, loopLabel);
+        hi.Add(CilOpCodes.Ldnull);
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        readConfigHelper.CilMethodBody = body;
+        networkType.Methods.Add(readConfigHelper);
+    }
+
+    var writeHelper = networkType.Methods.FirstOrDefault(m => m.Name == "__WriteAdvertisedExternalEndpoint");
+    if (writeHelper is null)
+    {
+        writeHelper = new MethodDefinition("__WriteAdvertisedExternalEndpoint",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.Void, new TypeDefOrRefSignature(netOutgoingMessageType)));
+
+        var body = new CilMethodBody(writeHelper);
+        var rawVar = new CilLocalVariable(corlib.String);
+        body.LocalVariables.Add(rawVar);
+
+        var emptyLabel = new CilInstructionLabel();
+        var doWriteLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+
+        hi.Add(CilOpCodes.Ldstr, publicHostIpPath);
+        hi.Add(CilOpCodes.Call, fileExists);
+        hi.Add(CilOpCodes.Brfalse, emptyLabel);
+        hi.Add(CilOpCodes.Ldstr, publicHostIpPath);
+        hi.Add(CilOpCodes.Call, readConfigHelper);
+        hi.Add(CilOpCodes.Stloc, rawVar);
+        hi.Add(CilOpCodes.Ldloc, rawVar);
+        hi.Add(CilOpCodes.Brtrue, doWriteLabel);
+
+        var emptyStart = new CilInstruction(CilOpCodes.Ldstr, string.Empty);
+        hi.Add(emptyStart);
+        emptyLabel.Instruction = emptyStart;
+        hi.Add(CilOpCodes.Stloc, rawVar);
+
+        var doWriteStart = new CilInstruction(CilOpCodes.Ldarg_0);
+        hi.Add(doWriteStart);
+        doWriteLabel.Instruction = doWriteStart;
+        hi.Add(CilOpCodes.Ldloc, rawVar);
+        hi.Add(CilOpCodes.Callvirt, writeStringMethod);
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        writeHelper.CilMethodBody = body;
+        networkType.Methods.Add(writeHelper);
+    }
+
+    int injectedCount = 0;
+    foreach (var methodName in new[] { "ServerStart", "ServerUpdate" })
+    {
+        var method = networkType.Methods.First(m => m.Name == methodName && m.CilMethodBody is not null);
+        var (idx, call, msgLocal) = FindRegisterJsonWrite(method);
+        if (idx < 0 || call is null || msgLocal is null)
+            throw new InvalidOperationException($"Could not find json Write(String) call in {methodName} register packet builder.");
+
+        var instructions = method.CilMethodBody!.Instructions;
+        instructions.Insert(idx + 1, new CilInstruction(CilOpCodes.Ldloc, msgLocal));
+        instructions.Insert(idx + 2, new CilInstruction(CilOpCodes.Call, writeHelper));
+        instructions.OptimizeMacros();
+        injectedCount++;
+    }
+
+    if (injectedCount == 0)
+        throw new InvalidOperationException("Could not inject advertised-external-endpoint writer into any method.");
+}
+
+(int Index, CilInstruction? Call, CilLocalVariable? MsgLocal) FindRegisterJsonWrite(MethodDefinition method)
+{
+    var body = method.CilMethodBody!;
+    var instructions = body.Instructions;
+    bool sawWriteInt64 = false;
+
+    for (int i = 0; i < instructions.Count; i++)
+    {
+        var instr = instructions[i];
+        if (instr.OpCode != CilOpCodes.Callvirt && instr.OpCode != CilOpCodes.Call)
+            continue;
+        if (instr.Operand is not IMethodDescriptor called)
+            continue;
+        if (!string.Equals(called.Name?.ToString(), "Write", StringComparison.Ordinal))
+            continue;
+        if (!string.Equals(called.DeclaringType?.Name?.ToString(), "NetOutgoingMessage", StringComparison.Ordinal))
+            continue;
+        if (called.Signature is not MethodSignature sig || sig.ParameterTypes.Count != 1)
+            continue;
+
+        var paramFullName = sig.ParameterTypes[0].FullName;
+        if (string.Equals(paramFullName, "System.Int64", StringComparison.Ordinal))
+        {
+            sawWriteInt64 = true;
+            continue;
+        }
+
+        if (!sawWriteInt64)
+            continue;
+
+        if (!string.Equals(paramFullName, "System.String", StringComparison.Ordinal))
+            continue;
+
+        CilLocalVariable? msgLocal = null;
+        if (i >= 2)
+            msgLocal = ResolveLdlocLocal(instructions[i - 2], body);
+
+        return (i, instr, msgLocal);
+    }
+
+    return (-1, null, null);
+}
+
+CilLocalVariable? ResolveLdlocLocal(CilInstruction instr, CilMethodBody body)
+{
+    if (instr.Operand is CilLocalVariable v)
+        return v;
+
+    int index = instr.OpCode.Code switch
+    {
+        CilCode.Ldloc_0 => 0,
+        CilCode.Ldloc_1 => 1,
+        CilCode.Ldloc_2 => 2,
+        CilCode.Ldloc_3 => 3,
+        _ => -1,
+    };
+
+    return index >= 0 && index < body.LocalVariables.Count
+        ? body.LocalVariables[index]
+        : null;
+}
+
+void PatchSafeLocalHostIpOverride()
+{
+    const string BackupSuffix = ".localipbak";
+
+    string? dllPath = FindFile(LidgrenDllName);
+    if (dllPath is null)
+    {
+        Console.Error.WriteLine($"Could not find {LidgrenDllName}.");
+        Environment.Exit(1);
+        return;
+    }
+
+    string backupPath = dllPath + BackupSuffix;
+    if (File.Exists(backupPath))
+        return;
+
+    File.Copy(dllPath, backupPath);
+
+    string localHostIpPath = Path.Combine(Path.GetDirectoryName(dllPath)!, LocalHostIpFileName);
+    var module = ModuleDefinition.FromFile(dllPath);
+    var corlib = module.CorLibTypeFactory;
+    var scope = corlib.CorLibScope;
+
+    var fileType = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+    var netUtility = module.TopLevelTypes.First(t => t.Name == "NetUtility");
+
+    var fileExists = new MemberReference(fileType, "Exists",
+        MethodSignature.CreateStatic(corlib.Boolean, corlib.String));
+    var readAllLines = new MemberReference(fileType, "ReadAllLines",
+        MethodSignature.CreateStatic(new SzArrayTypeSignature(corlib.String), corlib.String));
+    var strTrim = new MemberReference(stringType, "Trim",
+        MethodSignature.CreateInstance(corlib.String));
+    var strGetLength = new MemberReference(stringType, "get_Length",
+        MethodSignature.CreateInstance(corlib.Int32));
+    var strGetChars = new MemberReference(stringType, "get_Chars",
+        MethodSignature.CreateInstance(corlib.Char, corlib.Int32));
+
+    var readConfigHelper = netUtility.Methods.FirstOrDefault(m => m.Name == "__ReadConfigLine");
+    if (readConfigHelper is null)
+    {
+        readConfigHelper = new MethodDefinition("__ReadConfigLine",
+            MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.String, corlib.String));
+
+        var body = new CilMethodBody(readConfigHelper);
+        var linesVar = new CilLocalVariable(new SzArrayTypeSignature(corlib.String));
+        var indexVar = new CilLocalVariable(corlib.Int32);
+        var lineVar = new CilLocalVariable(corlib.String);
+        body.LocalVariables.Add(linesVar);
+        body.LocalVariables.Add(indexVar);
+        body.LocalVariables.Add(lineVar);
+
+        var loopLabel = new CilInstructionLabel();
+        var checkLabel = new CilInstructionLabel();
+        var nextLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+
+        hi.Add(CilOpCodes.Ldarg_0);
+        hi.Add(CilOpCodes.Call, readAllLines);
+        hi.Add(CilOpCodes.Stloc, linesVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+        hi.Add(CilOpCodes.Br, checkLabel);
+
+        var loopStart = new CilInstruction(CilOpCodes.Ldloc, linesVar);
+        hi.Add(loopStart);
+        loopLabel.Instruction = loopStart;
+        hi.Add(CilOpCodes.Ldloc, indexVar);
+        hi.Add(CilOpCodes.Ldelem_Ref);
+        hi.Add(CilOpCodes.Callvirt, strTrim);
+        hi.Add(CilOpCodes.Stloc, lineVar);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Callvirt, strGetLength);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Ble, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ldc_I4_0);
+        hi.Add(CilOpCodes.Callvirt, strGetChars);
+        hi.Add(CilOpCodes.Ldc_I4_S, (sbyte)35);
+        hi.Add(CilOpCodes.Beq, nextLabel);
+        hi.Add(CilOpCodes.Ldloc, lineVar);
+        hi.Add(CilOpCodes.Ret);
+
+        var nextStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(nextStart);
+        nextLabel.Instruction = nextStart;
+        hi.Add(CilOpCodes.Ldc_I4_1);
+        hi.Add(CilOpCodes.Add);
+        hi.Add(CilOpCodes.Stloc, indexVar);
+
+        var checkStart = new CilInstruction(CilOpCodes.Ldloc, indexVar);
+        hi.Add(checkStart);
+        checkLabel.Instruction = checkStart;
+        hi.Add(CilOpCodes.Ldloc, linesVar);
+        hi.Add(CilOpCodes.Ldlen);
+        hi.Add(CilOpCodes.Conv_I4);
+        hi.Add(CilOpCodes.Blt, loopLabel);
+        hi.Add(CilOpCodes.Ldnull);
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        readConfigHelper.CilMethodBody = body;
+        netUtility.Methods.Add(readConfigHelper);
+    }
+
+    var resolveStringMethod = netUtility.Methods.First(m =>
+        m.Name == "Resolve" &&
+        m.Parameters.Count == 1 &&
+        m.Signature is not null &&
+        m.Signature.ReturnType.IsTypeOf("System.Net", "IPAddress"));
+
+    var preferredIpHelper = netUtility.Methods.FirstOrDefault(m => m.Name == "__GetPreferredLocalIp");
+    if (preferredIpHelper is null)
+    {
+        var ipAddressType = new TypeReference(module, scope, "System.Net", "IPAddress");
+        preferredIpHelper = new MethodDefinition("__GetPreferredLocalIp",
+            MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(new TypeDefOrRefSignature(ipAddressType), new TypeDefOrRefSignature(ipAddressType)));
+
+        var body = new CilMethodBody(preferredIpHelper);
+        var configuredHostVar = new CilLocalVariable(corlib.String);
+        var configuredIpVar = new CilLocalVariable(new TypeDefOrRefSignature(ipAddressType));
+        body.LocalVariables.Add(configuredHostVar);
+        body.LocalVariables.Add(configuredIpVar);
+
+        var fallbackLabel = new CilInstructionLabel();
+        var hi = body.Instructions;
+        hi.Add(CilOpCodes.Ldstr, localHostIpPath);
+        hi.Add(CilOpCodes.Call, fileExists);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldstr, localHostIpPath);
+        hi.Add(CilOpCodes.Call, readConfigHelper);
+        hi.Add(CilOpCodes.Stloc, configuredHostVar);
+        hi.Add(CilOpCodes.Ldloc, configuredHostVar);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldloc, configuredHostVar);
+        hi.Add(CilOpCodes.Call, resolveStringMethod);
+        hi.Add(CilOpCodes.Stloc, configuredIpVar);
+        hi.Add(CilOpCodes.Ldloc, configuredIpVar);
+        hi.Add(CilOpCodes.Brfalse, fallbackLabel);
+        hi.Add(CilOpCodes.Ldloc, configuredIpVar);
+        hi.Add(CilOpCodes.Ret);
+
+        var fallbackStart = new CilInstruction(CilOpCodes.Ldarg_0);
+        hi.Add(fallbackStart);
+        fallbackLabel.Instruction = fallbackStart;
+        hi.Add(CilOpCodes.Ret);
+
+        body.Instructions.OptimizeMacros();
+        preferredIpHelper.CilMethodBody = body;
+        netUtility.Methods.Add(preferredIpHelper);
+    }
+
+    var getMyAddressMethod = netUtility.Methods.FirstOrDefault(m =>
+        m.Name == "GetMyAddress" && m.CilMethodBody is not null);
+
+    if (getMyAddressMethod is not null)
+    {
+        var instructions = getMyAddressMethod.CilMethodBody!.Instructions;
+        var retIndexes = Enumerable.Range(0, instructions.Count)
+            .Where(i => instructions[i].OpCode == CilOpCodes.Ret)
+            .OrderByDescending(i => i)
+            .ToList();
+
+        foreach (int retIndex in retIndexes)
+            instructions.Insert(retIndex, new CilInstruction(CilOpCodes.Call, preferredIpHelper));
+
+        getMyAddressMethod.CilMethodBody!.Instructions.OptimizeMacros();
+    }
+
+    module.Write(dllPath);
+    Console.WriteLine($"Patched {LidgrenDllName} - added optional {LocalHostIpFileName} override to NetUtility.GetMyAddress.");
+}
+
+void PatchLidgren(string path, string backup, bool includeRouteAwareLocalIpFix)
 {
     File.Copy(path, backup);
 
@@ -157,10 +926,13 @@ void PatchLidgren(string path, string backup)
     var configPathInGameDir = Path.Combine(Path.GetDirectoryName(path)!, ConfigFileName);
 
     // ---- type references ---------------------------------------------------
-    var fileType      = new TypeReference(module, scope, "System.IO", "File");
-    var stringType    = new TypeReference(module, scope, "System",    "String");
-    var dateTimeType  = new TypeReference(module, scope, "System",    "DateTime");
-    var dateTimeSig   = new TypeDefOrRefSignature(dateTimeType);
+    var fileType        = new TypeReference(module, scope, "System.IO", "File");
+    var stringType      = new TypeReference(module, scope, "System",    "String");
+    var dateTimeType    = new TypeReference(module, scope, "System",    "DateTime");
+    var dateTimeSig     = new TypeDefOrRefSignature(dateTimeType);
+    string logsDirPath  = Path.Combine(Path.GetDirectoryName(path)!, "Logs");
+    string networkLogPath = Path.Combine(logsDirPath, "network_debug.log");
+    Directory.CreateDirectory(logsDirPath);
 
     // ---- method references -------------------------------------------------
     var fileExists    = new MemberReference(fileType, "Exists",
@@ -210,7 +982,7 @@ void PatchLidgren(string path, string backup)
     li.Add(CilOpCodes.Ldarg_0);
     li.Add(CilOpCodes.Call,     strConcat2);
     li.Add(CilOpCodes.Stloc,    lineVar);
-    li.Add(CilOpCodes.Ldstr,    "network_debug.log");
+    li.Add(CilOpCodes.Ldstr,    networkLogPath);
     li.Add(CilOpCodes.Ldloc,    lineVar);
     li.Add(CilOpCodes.Call,     appendAllText);
     li.Add(CilOpCodes.Ret);
@@ -363,7 +1135,7 @@ void PatchLidgren(string path, string backup)
     // This makes VPN/Tailscale work when they are the real route to the master
     // server, while still falling back to a safer IPv4 scan if needed.
     var sysRef = module.AssemblyReferences.FirstOrDefault(r => r.Name == "System");
-    if (sysRef is not null)
+    if (includeRouteAwareLocalIpFix && sysRef is not null)
     {
         var ipAddrRef    = new TypeReference(module, sysRef, "System.Net", "IPAddress");
         var dnsRef       = new TypeReference(module, sysRef, "System.Net", "Dns");
@@ -635,6 +1407,10 @@ void PatchLidgren(string path, string backup)
             Console.WriteLine("Injected route-aware local-IP fix into NetUtility.GetMyAddress.");
         }
     }
+    else if (!includeRouteAwareLocalIpFix)
+    {
+        Console.WriteLine("Skipped route-aware local-IP fix in NetUtility.GetMyAddress.");
+    }
 
     module.Write(path);
 
@@ -654,20 +1430,53 @@ void Restore()
         {
             File.Copy(backup, dll, overwrite: true);
             File.Delete(backup);
+            string netdebugBackup = dll + ".netdebugbak";
+            if (File.Exists(netdebugBackup))
+                File.Delete(netdebugBackup);
             Console.WriteLine($"Restored original {LidgrenDllName}.");
             restoredAny = true;
+        }
+
+        string localIpBackup = dll + ".localipbak";
+        if (File.Exists(localIpBackup))
+        {
+            File.Copy(localIpBackup, dll, overwrite: true);
+            File.Delete(localIpBackup);
+            Console.WriteLine($"Restored original {LidgrenDllName} local-IP behavior.");
+            restoredAny = true;
+        }
+
+        string legacyNetdebugBackup = dll + ".netdebugbak";
+        if (File.Exists(legacyNetdebugBackup))
+        {
+            File.Delete(legacyNetdebugBackup);
+            Console.WriteLine($"Removed legacy {LidgrenDllName} network debug backup.");
         }
     }
 
     string? exePath = FindFile(ExeName);
     if (exePath is not null)
     {
+        string exeDir = Path.GetDirectoryName(exePath)!;
         string browserBackup = exePath + ".browserbak";
+        string netdebugBackup = Path.Combine(exeDir, "ApotheonArena.exe.netdebugbak");
+        string diagnoseBackup = Path.Combine(exeDir, "ApotheonArena.exe.diagbak");
         if (File.Exists(browserBackup))
         {
             File.Copy(browserBackup, exePath, overwrite: true);
             File.Delete(browserBackup);
+            if (File.Exists(netdebugBackup))
+                File.Delete(netdebugBackup);
+            if (File.Exists(diagnoseBackup))
+                File.Delete(diagnoseBackup);
             Console.WriteLine($"Restored original {ExeName} browser behavior.");
+            restoredAny = true;
+        }
+        else if (File.Exists(netdebugBackup))
+        {
+            File.Copy(netdebugBackup, exePath, overwrite: true);
+            File.Delete(netdebugBackup);
+            Console.WriteLine($"Restored original {ExeName} from network debug backup.");
             restoredAny = true;
         }
     }
@@ -694,11 +1503,98 @@ string? FindFile(string name)
     return null;
 }
 
-void PatchEmptyServerListMessage(string exePath, string backup)
+void InspectType(string typeName)
 {
-    File.Copy(exePath, backup);
+    string? exePath = FindFile(ExeName);
+    if (exePath is null)
+    {
+        Console.Error.WriteLine($"Could not find {ExeName}.");
+        Environment.Exit(1);
+        return;
+    }
 
     var module = ModuleDefinition.FromFile(exePath);
+    var type = module.GetAllTypes().FirstOrDefault(t => t.FullName == typeName || t.Name == typeName);
+    if (type is null)
+    {
+        Console.Error.WriteLine($"Type not found: {typeName}");
+        Environment.Exit(1);
+        return;
+    }
+
+    Console.WriteLine(type.FullName);
+    Console.WriteLine("Fields:");
+    foreach (var field in type.Fields)
+        Console.WriteLine($"  {field.Signature?.FieldType.FullName} {field.Name}");
+    Console.WriteLine("Methods:");
+    foreach (var method in type.Methods)
+        Console.WriteLine($"  {method.Name}");
+}
+
+void InspectMethod(string typeName, string methodName)
+{
+    string? exePath = FindFile(ExeName);
+    if (exePath is null)
+    {
+        Console.Error.WriteLine($"Could not find {ExeName}.");
+        Environment.Exit(1);
+        return;
+    }
+
+    var module = ModuleDefinition.FromFile(exePath);
+    var type = module.GetAllTypes().FirstOrDefault(t => t.FullName == typeName || t.Name == typeName);
+    if (type is null)
+    {
+        Console.Error.WriteLine($"Type not found: {typeName}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var methods = type.Methods.Where(m => m.Name == methodName).ToList();
+    if (methods.Count == 0)
+    {
+        Console.Error.WriteLine($"Method not found: {type.FullName}::{methodName}");
+        Environment.Exit(1);
+        return;
+    }
+
+    foreach (var method in methods)
+    {
+        Console.WriteLine($"{type.FullName}::{method.Name}");
+        Console.WriteLine($"  Params: {string.Join(", ", method.Parameters.Select(p => p.ParameterType.FullName + " " + p.Name))}");
+        Console.WriteLine($"  Return: {method.Signature?.ReturnType.FullName}");
+
+        if (method.CilMethodBody is null)
+        {
+            Console.WriteLine("  <no CIL body>");
+            continue;
+        }
+
+        int index = 0;
+        foreach (var instr in method.CilMethodBody.Instructions)
+        {
+            Console.WriteLine($"  IL_{index:D4}: {instr.OpCode,-12} {FormatInspectOperand(instr.Operand)}");
+            index++;
+        }
+    }
+}
+
+string FormatInspectOperand(object? operand)
+{
+    return operand switch
+    {
+        null => string.Empty,
+        string s => $"\"{s}\"",
+        IMethodDescriptor m => m.FullName,
+        IFieldDescriptor f => f.FullName,
+        ITypeDescriptor t => t.FullName,
+        CilInstructionLabel l when l.Instruction is not null => $"-> {l.Instruction.OpCode}",
+        _ => operand.ToString() ?? string.Empty
+    };
+}
+
+void ApplyEmptyServerListMessagePatch(ModuleDefinition module)
+{
     var serverBrowser = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "ServerBrowser");
     var screenElement = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "ScreenElement");
     var screenManager = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "ScreenManager");
@@ -760,16 +1656,12 @@ void PatchEmptyServerListMessage(string exePath, string backup)
         instrs.Insert(insertIndex + i, popupCode[i]);
 
     body.Instructions.OptimizeMacros();
-    module.Write(exePath);
 
     Console.WriteLine("Patched ApotheonArena.exe â€” empty server lists now show 'No games available.'");
-    Console.WriteLine($"Backup saved as {Path.GetFileName(backup)}");
 }
 
 void Diagnose()
 {
-    const string BackupName = "ApotheonArena.exe.diagbak";
-
     string? exePath = FindFile(ExeName);
     if (exePath is null)
     {
@@ -777,59 +1669,15 @@ void Diagnose()
         Environment.Exit(1); return;
     }
 
-    string backup = Path.Combine(Path.GetDirectoryName(exePath)!, BackupName);
+    string exeDir = Path.GetDirectoryName(exePath)!;
+    string backup = Path.Combine(exeDir, "ApotheonArena.exe.diagbak");
+
+    Console.WriteLine("In-process diagnose is disabled because it destabilizes the game.");
     if (File.Exists(backup))
-    {
-        Console.Error.WriteLine("Diagnose patch already applied. Run 'undiagnose' first.");
-        Environment.Exit(1); return;
-    }
-
-    File.Copy(exePath, backup);
-
-    var module  = ModuleDefinition.FromFile(exePath);
-    var corlib  = module.CorLibTypeFactory;
-    var scope   = corlib.CorLibScope;
-
-    var fileType  = new TypeReference(module, scope, "System.IO", "File");
-    var appendAll = new MemberReference(fileType, "AppendAllText",
-        MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String));
-
-    var startType   = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Start");
-    var crashMethod = startType.Methods.First(m => m.Name == "Crash");
-    var body        = crashMethod.CilMethodBody!;
-    var exParam     = crashMethod.Parameters[2];
-
-    var exType     = new TypeReference(module, scope, "System", "Exception");
-    var exToString = new MemberReference(exType, "ToString",
-        MethodSignature.CreateInstance(corlib.String));
-    var strConcat  = new MemberReference(
-        new TypeReference(module, scope, "System", "String"), "Concat",
-        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String));
-
-    var logEntryVar = new CilLocalVariable(corlib.String);
-    body.LocalVariables.Add(logEntryVar);
-
-    var prefix = new List<CilInstruction>
-    {
-        new(CilOpCodes.Ldstr,    "---CRASH---\n"),
-        new(CilOpCodes.Ldarg,    exParam),
-        new(CilOpCodes.Callvirt, exToString),
-        new(CilOpCodes.Ldstr,    "\n"),
-        new(CilOpCodes.Call,     strConcat),
-        new(CilOpCodes.Stloc,    logEntryVar),
-        new(CilOpCodes.Ldstr,    "crash.log"),
-        new(CilOpCodes.Ldloc,    logEntryVar),
-        new(CilOpCodes.Call,     appendAll),
-    };
-
-    for (int i = 0; i < prefix.Count; i++)
-        body.Instructions.Insert(i, prefix[i]);
-
-    body.Instructions.OptimizeMacros();
-    module.Write(exePath);
-
-    Console.WriteLine("Diagnose patch applied to ApotheonArena.exe.");
-    Console.WriteLine("Reproduce the crash, then check crash.log in the game folder.");
+        Console.WriteLine("An older diagnose patch backup still exists. Run 'undiagnose' to restore the original executable first.");
+    Console.WriteLine("Use the external crash watcher instead:");
+    Console.WriteLine(@"  .\DiagnoseTrace\bin\Debug\net8.0\DiagnoseTrace.exe --launch --procdump");
+    Console.WriteLine("That captures transition logs and crash artifacts without patching ApotheonArena.exe.");
 }
 
 void Undiagnose()
@@ -845,6 +1693,204 @@ void Undiagnose()
     File.Copy(backup, exePath, overwrite: true);
     File.Delete(backup);
     Console.WriteLine("Diagnose patch removed.");
+}
+
+void SafeNetDebug()
+{
+    const string BackupName = "ApotheonArena.exe.netdebugbak";
+
+    string? exePath = FindFile(ExeName);
+    if (exePath is null)
+    {
+        Console.Error.WriteLine($"Could not find {ExeName}.");
+        Environment.Exit(1);
+        return;
+    }
+
+    string exeDir = Path.GetDirectoryName(exePath)!;
+    string backup = Path.Combine(exeDir, BackupName);
+    string? dll = FindFile(LidgrenDllName);
+    string? legacyBackup = dll is null ? null : dll + ".netdebugbak";
+
+    if (File.Exists(backup))
+    {
+        Console.Error.WriteLine("Network debug already enabled. Run 'unnetdebug' first.");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (legacyBackup is not null && File.Exists(legacyBackup))
+    {
+        Console.Error.WriteLine("Legacy Lidgren network debug backup found. Run 'unnetdebug' first.");
+        Environment.Exit(1);
+        return;
+    }
+
+    File.Copy(exePath, backup);
+
+    var module = ModuleDefinition.FromFile(exePath);
+    var corlib = module.CorLibTypeFactory;
+    var scope = corlib.CorLibScope;
+
+    var fileType = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+    var dateTimeType = new TypeReference(module, scope, "System", "DateTime");
+    var dateTimeSig = new TypeDefOrRefSignature(dateTimeType);
+    string logsDirPath = Path.Combine(exeDir, "Logs");
+    string networkLogPath = Path.Combine(logsDirPath, "network_debug.log");
+    Directory.CreateDirectory(logsDirPath);
+
+    var appendAll = new MemberReference(fileType, "AppendAllText",
+        MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String));
+    var concat2 = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String));
+    var concat3 = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String));
+    var getUtcNow = new MemberReference(dateTimeType, "get_UtcNow",
+        MethodSignature.CreateStatic(dateTimeSig));
+    var dateTimeFmt = new MemberReference(dateTimeType, "ToString",
+        MethodSignature.CreateInstance(corlib.String, corlib.String));
+
+    var networkType = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Network");
+    var serverBrowser = module.TopLevelTypes.FirstOrDefault(t => t.Namespace == "Apotheon" && t.Name == "ServerBrowser");
+
+    var logHelper = networkType.Methods.FirstOrDefault(m => m.Name == "__NetDebugLog");
+    if (logHelper is null)
+    {
+        logHelper = new MethodDefinition("__NetDebugLog",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.Void, corlib.String));
+        networkType.Methods.Add(logHelper);
+    }
+
+    var logBody = new CilMethodBody(logHelper);
+    var tsVar = new CilLocalVariable(corlib.String);
+    var lineVar = new CilLocalVariable(corlib.String);
+    logBody.LocalVariables.Add(tsVar);
+    logBody.LocalVariables.Add(lineVar);
+
+    var li = logBody.Instructions;
+    li.Add(CilOpCodes.Call, getUtcNow);
+    li.Add(CilOpCodes.Ldstr, "yyyy-MM-dd HH:mm:ss.fff'Z' ");
+    li.Add(CilOpCodes.Call, dateTimeFmt);
+    li.Add(CilOpCodes.Stloc, tsVar);
+    li.Add(CilOpCodes.Ldloc, tsVar);
+    li.Add(CilOpCodes.Ldarg_0);
+    li.Add(CilOpCodes.Call, concat2);
+    li.Add(CilOpCodes.Stloc, lineVar);
+    li.Add(CilOpCodes.Ldstr, networkLogPath);
+    li.Add(CilOpCodes.Ldloc, lineVar);
+    li.Add(CilOpCodes.Call, appendAll);
+    li.Add(CilOpCodes.Ret);
+    logBody.Instructions.OptimizeMacros();
+    logHelper.CilMethodBody = logBody;
+
+    MethodDefinition? masterHostProvider = networkType.Methods.FirstOrDefault(m =>
+        m.Name == "__GetMasterServerHost" &&
+        m.Parameters.Count == 0 &&
+        m.Signature is not null &&
+        m.Signature.ReturnType.IsTypeOf("System", "String"));
+
+    if (masterHostProvider is null)
+    {
+        masterHostProvider = new MethodDefinition("__NetDebugGetMasterServerHost",
+            MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig,
+            MethodSignature.CreateStatic(corlib.String));
+        var hostBody = new CilMethodBody(masterHostProvider);
+        hostBody.Instructions.Add(CilOpCodes.Ldstr, OriginalIp);
+        hostBody.Instructions.Add(CilOpCodes.Ret);
+        hostBody.Instructions.OptimizeMacros();
+        masterHostProvider.CilMethodBody = hostBody;
+        networkType.Methods.Add(masterHostProvider);
+    }
+
+    void AddLogPrefix(MethodDefinition method, string eventName, bool includeMasterHost)
+    {
+        if (method.CilMethodBody is null)
+            return;
+
+        var prefix = new List<CilInstruction>
+        {
+            new(CilOpCodes.Ldstr, $"[{eventName}]\n"),
+            new(CilOpCodes.Call, logHelper),
+        };
+
+        if (includeMasterHost)
+        {
+            prefix.Add(new CilInstruction(CilOpCodes.Ldstr, "[master] "));
+            prefix.Add(new CilInstruction(CilOpCodes.Call, masterHostProvider));
+            prefix.Add(new CilInstruction(CilOpCodes.Ldstr, "\n"));
+            prefix.Add(new CilInstruction(CilOpCodes.Call, concat3));
+            prefix.Add(new CilInstruction(CilOpCodes.Call, logHelper));
+        }
+
+        for (int i = 0; i < prefix.Count; i++)
+            method.CilMethodBody.Instructions.Insert(i, prefix[i]);
+
+        method.CilMethodBody.Instructions.OptimizeMacros();
+    }
+
+    AddLogPrefix(networkType.Methods.First(m => m.Name == "ServerStart" && m.CilMethodBody is not null), "server-start", includeMasterHost: true);
+    AddLogPrefix(networkType.Methods.First(m => m.Name == "ServerQuit" && m.CilMethodBody is not null), "server-quit", includeMasterHost: true);
+    AddLogPrefix(networkType.Methods.First(m => m.Name == "RequestNATIntroduction" && m.CilMethodBody is not null), "nat-request", includeMasterHost: true);
+
+    if (serverBrowser is not null)
+    {
+        var onInitialize = serverBrowser.Methods.FirstOrDefault(m => m.Name == "OnInitialize" && m.CilMethodBody is not null);
+        if (onInitialize is not null)
+            AddLogPrefix(onInitialize, "browser-init", includeMasterHost: true);
+
+        var refresh = serverBrowser.Methods.FirstOrDefault(m => m.Name == "Refresh" && m.CilMethodBody is not null);
+        if (refresh is not null)
+            AddLogPrefix(refresh, "browser-refresh", includeMasterHost: true);
+    }
+
+    module.Write(exePath);
+
+    Console.WriteLine("Network debug enabled. Logged to Logs\\network_debug.log:");
+    Console.WriteLine("  [browser-init]     server browser initialization");
+    Console.WriteLine("  [browser-refresh]  server browser refresh requests");
+    Console.WriteLine("  [server-start]     hosting flow started");
+    Console.WriteLine("  [server-quit]      hosting flow stopped");
+    Console.WriteLine("  [nat-request]      join/NAT introduction requested");
+    Console.WriteLine("  [master]           master server host used by the active flow");
+}
+
+void SafeUnNetDebug()
+{
+    bool removedAny = false;
+
+    string? exePath = FindFile(ExeName);
+    if (exePath is not null)
+    {
+        string backup = Path.Combine(Path.GetDirectoryName(exePath)!, "ApotheonArena.exe.netdebugbak");
+        if (File.Exists(backup))
+        {
+            File.Copy(backup, exePath, overwrite: true);
+            File.Delete(backup);
+            Console.WriteLine("Network debug disabled.");
+            removedAny = true;
+        }
+    }
+
+    string? dll = FindFile(LidgrenDllName);
+    if (dll is not null)
+    {
+        string legacyBackup = dll + ".netdebugbak";
+        if (File.Exists(legacyBackup))
+        {
+            File.Copy(legacyBackup, dll, overwrite: true);
+            File.Delete(legacyBackup);
+            Console.WriteLine("Legacy Lidgren network debug disabled.");
+            removedAny = true;
+        }
+    }
+
+    if (!removedAny)
+    {
+        Console.Error.WriteLine("Network debug not enabled.");
+        Environment.Exit(1);
+    }
 }
 
 void NetDebug()
@@ -869,10 +1915,13 @@ void NetDebug()
     var corlib     = module.CorLibTypeFactory;
     var scope      = corlib.CorLibScope;
 
-    var fileType   = new TypeReference(module, scope, "System.IO", "File");
-    var stringType = new TypeReference(module, scope, "System",    "String");
-    var dateTimeType = new TypeReference(module, scope, "System",  "DateTime");
-    var dateTimeSig  = new TypeDefOrRefSignature(dateTimeType);
+    var fileType        = new TypeReference(module, scope, "System.IO", "File");
+    var stringType      = new TypeReference(module, scope, "System",    "String");
+    var dateTimeType    = new TypeReference(module, scope, "System",    "DateTime");
+    var dateTimeSig     = new TypeDefOrRefSignature(dateTimeType);
+    string logsDirPath  = Path.Combine(Path.GetDirectoryName(dll)!, "Logs");
+    string networkLogPath = Path.Combine(logsDirPath, "network_debug.log");
+    Directory.CreateDirectory(logsDirPath);
 
     var appendAll  = new MemberReference(fileType,   "AppendAllText",
         MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String));
@@ -899,31 +1948,31 @@ void NetDebug()
         logHelper = new MethodDefinition("__NetDebugLog",
             MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,
             MethodSignature.CreateStatic(corlib.Void, corlib.String));
-
-        var lBody = new CilMethodBody(logHelper);
-        var tsVar = new CilLocalVariable(corlib.String);
-        var lineVar = new CilLocalVariable(corlib.String);
-        lBody.LocalVariables.Add(tsVar);
-        lBody.LocalVariables.Add(lineVar);
-
-        var li = lBody.Instructions;
-        li.Add(CilOpCodes.Call,     getUtcNow);
-        li.Add(CilOpCodes.Ldstr,    "yyyy-MM-dd HH:mm:ss.fff'Z' ");
-        li.Add(CilOpCodes.Call,     dateTimeFmt);
-        li.Add(CilOpCodes.Stloc,    tsVar);
-        li.Add(CilOpCodes.Ldloc,    tsVar);
-        li.Add(CilOpCodes.Ldarg_0);
-        li.Add(CilOpCodes.Call,     concat2);
-        li.Add(CilOpCodes.Stloc,    lineVar);
-        li.Add(CilOpCodes.Ldstr,    "network_debug.log");
-        li.Add(CilOpCodes.Ldloc,    lineVar);
-        li.Add(CilOpCodes.Call,     appendAll);
-        li.Add(CilOpCodes.Ret);
-
-        lBody.Instructions.OptimizeMacros();
-        logHelper.CilMethodBody = lBody;
         netUtility.Methods.Add(logHelper);
     }
+
+    var lBody = new CilMethodBody(logHelper);
+    var tsVar = new CilLocalVariable(corlib.String);
+    var lineVar = new CilLocalVariable(corlib.String);
+    lBody.LocalVariables.Add(tsVar);
+    lBody.LocalVariables.Add(lineVar);
+
+    var li = lBody.Instructions;
+    li.Add(CilOpCodes.Call,     getUtcNow);
+    li.Add(CilOpCodes.Ldstr,    "yyyy-MM-dd HH:mm:ss.fff'Z' ");
+    li.Add(CilOpCodes.Call,     dateTimeFmt);
+    li.Add(CilOpCodes.Stloc,    tsVar);
+    li.Add(CilOpCodes.Ldloc,    tsVar);
+    li.Add(CilOpCodes.Ldarg_0);
+    li.Add(CilOpCodes.Call,     concat2);
+    li.Add(CilOpCodes.Stloc,    lineVar);
+    li.Add(CilOpCodes.Ldstr,    networkLogPath);
+    li.Add(CilOpCodes.Ldloc,    lineVar);
+    li.Add(CilOpCodes.Call,     appendAll);
+    li.Add(CilOpCodes.Ret);
+
+    lBody.Instructions.OptimizeMacros();
+    logHelper.CilMethodBody = lBody;
     var resolve    = netUtility.Methods.First(m =>
         m.Name == "Resolve" &&
         m.Parameters.Count == 2 &&
@@ -1224,7 +2273,7 @@ void NetDebug()
     }
 
     module.Write(dll);
-    Console.WriteLine("Network debug enabled. Logged to network_debug.log:");
+    Console.WriteLine("Network debug enabled. Logged to Logs\\network_debug.log:");
     Console.WriteLine("  [master]           master server IP from config file");
     Console.WriteLine("  [resolve]          DNS/IP resolution");
     Console.WriteLine("  [local-ip]         local IP Lidgren detected for this machine");
@@ -1254,10 +2303,11 @@ void PrintUsage()
     Console.WriteLine();
     Console.WriteLine("  ApotheonArenaMPpatch.exe            open the interactive menu");
     Console.WriteLine("  ApotheonArenaMPpatch.exe patch      patch the game (run once)");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe restore    restore original Lidgren.Network.dll");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose   inject crash logger into ApotheonArena.exe");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose remove crash logger");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log networking calls to network_debug.log");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe restore    restore original game files");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose   show external crash-watch instructions");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose remove an old in-process diagnose patch");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe patch-basic patch without the route-aware local-IP fix");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log networking calls to Logs\\network_debug.log");
     Console.WriteLine("  ApotheonArenaMPpatch.exe unnetdebug remove network debug logging");
     Console.WriteLine();
     Console.WriteLine($"  After patching, edit {ConfigFileName} in the game folder.");
