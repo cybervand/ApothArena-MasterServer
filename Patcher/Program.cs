@@ -50,32 +50,26 @@ bool TryExecuteCommand(string command)
         case "patch":
             Patch();
             return true;
-        case "8":
-        case "patch-basic":
-        case "patch-noroute":
-            Patch(includeRouteAwareLocalIpFix: false);
-            return true;
         case "2":
         case "restore":
             Restore();
             return true;
-        case "3":
+        case "patch-basic":
+        case "patch-noroute":
+            Patch(includeRouteAwareLocalIpFix: false);
+            return true;
         case "netdebug":
             SafeNetDebug();
             return true;
-        case "4":
         case "unnetdebug":
             SafeUnNetDebug();
             return true;
-        case "5":
         case "diagnose":
             Diagnose();
             return true;
-        case "6":
         case "undiagnose":
             Undiagnose();
             return true;
-        case "7":
         case "menu":
             RunInteractiveMenu();
             return true;
@@ -94,11 +88,6 @@ void RunInteractiveMenu()
     Console.WriteLine();
     Console.WriteLine("  1. Patch game");
     Console.WriteLine("  2. Restore original files");
-    Console.WriteLine("  3. Enable network debug");
-    Console.WriteLine("  4. Disable network debug");
-    Console.WriteLine("  5. Show external crash watch help");
-    Console.WriteLine("  6. Remove old crash diagnose patch");
-    Console.WriteLine("  8. Patch game without route-aware local-IP fix");
     Console.WriteLine("  0. Exit");
     Console.WriteLine();
     Console.Write("Select option [1]: ");
@@ -2411,11 +2400,13 @@ void PrintUsage()
     Console.WriteLine("  ApotheonArenaMPpatch.exe            open the interactive menu");
     Console.WriteLine("  ApotheonArenaMPpatch.exe patch      patch the game (run once)");
     Console.WriteLine("  ApotheonArenaMPpatch.exe restore    restore original game files");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose   show external crash-watch instructions");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose remove an old in-process diagnose patch");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe patch-basic patch without the route-aware local-IP fix");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug   log networking calls to Logs\\network_debug.log");
-    Console.WriteLine("  ApotheonArenaMPpatch.exe unnetdebug remove network debug logging");
+    Console.WriteLine();
+    Console.WriteLine("Advanced (not shown in the menu):");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe patch-basic patch without the local-IP override");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe netdebug    log networking calls to Logs\\network_debug.log");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe unnetdebug  remove network debug logging");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe diagnose    show external crash-watch instructions");
+    Console.WriteLine("  ApotheonArenaMPpatch.exe undiagnose  remove an old in-process diagnose patch");
     Console.WriteLine();
     Console.WriteLine($"  After patching, edit {ConfigFileName} in the game folder.");
     Console.WriteLine("  Supports any IP or hostname - no length limit.");
