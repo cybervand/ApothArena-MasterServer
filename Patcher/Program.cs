@@ -290,8 +290,10 @@ void ApplyMasterServerRedirectPatch(ModuleDefinition module, string exePath)
     fallbackLabel.Instruction = fallbackStart;
     hi.Add(CilOpCodes.Ret);
 
-    body.Instructions.OptimizeMacros();
     helper.CilMethodBody = body;
+    WrapMethodBodyInTryCatch(helper, module,
+        fb => fb.Add(CilOpCodes.Ldstr, OriginalIp));
+    body.Instructions.OptimizeMacros();
     networkType.Methods.Add(helper);
 
     var targets = new[]
@@ -475,8 +477,13 @@ void ApplyGameLocalHostIpOverridePatch(ModuleDefinition module, string exePath)
         hi.Add(CilOpCodes.Call, getMyAddressMethod);
         hi.Add(CilOpCodes.Ret);
 
-        body.Instructions.OptimizeMacros();
         preferredIpHelper.CilMethodBody = body;
+        WrapMethodBodyInTryCatch(preferredIpHelper, module, fb =>
+        {
+            fb.Add(CilOpCodes.Ldarg_0);
+            fb.Add(CilOpCodes.Call, getMyAddressMethod);
+        });
+        body.Instructions.OptimizeMacros();
         networkType.Methods.Add(preferredIpHelper);
     }
 
@@ -655,8 +662,9 @@ void ApplyAdvertisedExternalEndpointPatch(ModuleDefinition module, string exePat
         hi.Add(CilOpCodes.Callvirt, writeStringMethod);
         hi.Add(CilOpCodes.Ret);
 
-        body.Instructions.OptimizeMacros();
         writeHelper.CilMethodBody = body;
+        WrapMethodBodyInTryCatch(writeHelper, module, _ => { });
+        body.Instructions.OptimizeMacros();
         networkType.Methods.Add(writeHelper);
     }
 
@@ -677,6 +685,90 @@ void ApplyAdvertisedExternalEndpointPatch(ModuleDefinition module, string exePat
 
     if (injectedCount == 0)
         throw new InvalidOperationException("Could not inject advertised-external-endpoint writer into any method.");
+}
+
+// Wraps an existing method body in a try/catch so exceptions thrown while the
+// injected helper runs cannot crash the host game. The caller has already
+// appended the happy-path IL; this rewrites every Ret into a Leave to a shared
+// end label and appends a catch handler that pops the exception, emits the
+// fallback value (if any), and falls through to the same end label.
+void WrapMethodBodyInTryCatch(
+    MethodDefinition method,
+    ModuleDefinition module,
+    Action<CilInstructionCollection> emitFallback)
+{
+    var body = method.CilMethodBody!;
+    var instructions = body.Instructions;
+    if (instructions.Count == 0)
+        return;
+
+    var sig = (MethodSignature)method.Signature!;
+    var returnType = sig.ReturnType;
+    bool isVoid = string.Equals(returnType.FullName, "System.Void", StringComparison.Ordinal);
+
+    CilLocalVariable? resultVar = null;
+    if (!isVoid)
+    {
+        resultVar = new CilLocalVariable(returnType);
+        body.LocalVariables.Add(resultVar);
+    }
+
+    var endLabel = new CilInstructionLabel();
+
+    for (int i = instructions.Count - 1; i >= 0; i--)
+    {
+        var ins = instructions[i];
+        if (ins.OpCode != CilOpCodes.Ret) continue;
+
+        if (isVoid)
+        {
+            ins.OpCode = CilOpCodes.Leave;
+            ins.Operand = endLabel;
+        }
+        else
+        {
+            ins.OpCode = CilOpCodes.Stloc;
+            ins.Operand = resultVar;
+            instructions.Insert(i + 1, new CilInstruction(CilOpCodes.Leave, endLabel));
+        }
+    }
+
+    var tryStartInstr = instructions[0];
+    int handlerStartIdx = instructions.Count;
+
+    instructions.Add(new CilInstruction(CilOpCodes.Pop));
+    emitFallback(instructions);
+    if (!isVoid)
+        instructions.Add(new CilInstruction(CilOpCodes.Stloc, resultVar));
+    instructions.Add(new CilInstruction(CilOpCodes.Leave, endLabel));
+
+    CilInstruction endInstr;
+    if (isVoid)
+    {
+        endInstr = new CilInstruction(CilOpCodes.Ret);
+        instructions.Add(endInstr);
+    }
+    else
+    {
+        endInstr = new CilInstruction(CilOpCodes.Ldloc, resultVar);
+        instructions.Add(endInstr);
+        instructions.Add(new CilInstruction(CilOpCodes.Ret));
+    }
+    endLabel.Instruction = endInstr;
+
+    var handlerStartInstr = instructions[handlerStartIdx];
+    var scope = module.CorLibTypeFactory.CorLibScope;
+    var exceptionType = new TypeReference(module, scope, "System", "Exception");
+
+    body.ExceptionHandlers.Add(new CilExceptionHandler
+    {
+        HandlerType = CilExceptionHandlerType.Exception,
+        TryStart = new CilInstructionLabel(tryStartInstr),
+        TryEnd = new CilInstructionLabel(handlerStartInstr),
+        HandlerStart = new CilInstructionLabel(handlerStartInstr),
+        HandlerEnd = new CilInstructionLabel(endInstr),
+        ExceptionType = exceptionType,
+    });
 }
 
 (int Index, CilInstruction? Call, CilLocalVariable? MsgLocal) FindRegisterJsonWrite(MethodDefinition method)
@@ -1576,7 +1668,22 @@ void InspectMethod(string typeName, string methodName)
             Console.WriteLine($"  IL_{index:D4}: {instr.OpCode,-12} {FormatInspectOperand(instr.Operand)}");
             index++;
         }
+
+        foreach (var eh in method.CilMethodBody.ExceptionHandlers)
+        {
+            Console.WriteLine($"  EH: {eh.HandlerType} type={eh.ExceptionType?.FullName} " +
+                $"tryStart={FormatInspectLabel(eh.TryStart)} tryEnd={FormatInspectLabel(eh.TryEnd)} " +
+                $"handlerStart={FormatInspectLabel(eh.HandlerStart)} handlerEnd={FormatInspectLabel(eh.HandlerEnd)}");
+        }
     }
+}
+
+string FormatInspectLabel(AsmResolver.PE.DotNet.Cil.ICilLabel? label)
+{
+    if (label is null) return "<null>";
+    if (label is CilInstructionLabel cil && cil.Instruction is not null)
+        return $"{cil.Instruction.OpCode}";
+    return label.ToString() ?? "<?>";
 }
 
 string FormatInspectOperand(object? operand)
