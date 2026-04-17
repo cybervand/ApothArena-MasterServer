@@ -105,6 +105,16 @@ Forward **UDP 14343** to the machine running the master server. No other ports
 need forwarding — players connect to each other via UDP hole punching without
 port forwarding on their end.
 
+### Unraid
+
+A ready-made Docker template lives at
+[`MasterServer/unraid-template.xml`](MasterServer/unraid-template.xml). Copy it
+to `/boot/config/plugins/dockerMan/templates-user/my-ApothArena-MasterServer.xml`
+on the Unraid box, then add the container from the Docker tab (or edit the
+existing one) to pick up the metadata and port label. Build the image first with
+`docker compose up -d --build` from `MasterServer/` so the `apotharena-masterserver`
+image exists locally for the template to reference.
+
 ### Logs
 
 ```bash

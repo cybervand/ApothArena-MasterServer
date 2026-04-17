@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>apotharena-masterserver</Name>
+  <Repository>apotharena-masterserver</Repository>
+  <Registry/>
+  <Network>host</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/cybervand/ApothArena-MasterServer/issues</Support>
+  <Project>https://github.com/cybervand/ApothArena-MasterServer</Project>
+  <Overview>Community master server for Apotheon Arena. Listens on UDP 14343 and tracks game hosts for the server browser. Use the companion ApotheonArenaMPpatch on each player's game install to point clients at this server.</Overview>
+  <Category>GameServers:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Master port" Target="14343" Default="14343" Mode="udp" Description="UDP port the master server listens on" Type="Port" Display="always" Required="true" Mask="false">14343</Config>
+</Container>
