@@ -108,12 +108,25 @@ port forwarding on their end.
 ### Unraid
 
 A ready-made Docker template lives at
-[`MasterServer/unraid-template.xml`](MasterServer/unraid-template.xml). Copy it
-to `/boot/config/plugins/dockerMan/templates-user/my-ApothArena-MasterServer.xml`
-on the Unraid box, then add the container from the Docker tab (or edit the
-existing one) to pick up the metadata and port label. Build the image first with
-`docker compose up -d --build` from `MasterServer/` so the `apotharena-masterserver`
-image exists locally for the template to reference.
+[`MasterServer/unraid-template.xml`](MasterServer/unraid-template.xml). It
+points at the pre-built image on GitHub Container Registry
+(`ghcr.io/cybervand/apotharena-masterserver:latest`), so Unraid's
+"Check for Updates" will work out of the box.
+
+Install:
+
+1. Copy the template to the Unraid box:
+   ```
+   cp MasterServer/unraid-template.xml \
+     /boot/config/plugins/dockerMan/templates-user/my-ApothArena-MasterServer.xml
+   ```
+2. In the Unraid Docker tab, click **Add Container** → pick
+   `apotharena-masterserver` from the template dropdown → Apply. Unraid pulls
+   the image from GHCR and starts it.
+
+Updates: click **Check for Updates** in the Docker tab. When a newer digest is
+available (pushed by the GitHub Actions workflow on every commit to `main`),
+hit **Apply Update**.
 
 ### Logs
 

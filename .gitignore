@@ -5,6 +5,10 @@
 !.gitignore
 !README.md
 
+# GitHub Actions
+!.github/
+!.github/**
+
 # Patcher source only (binaries distributed via GitHub Releases)
 !Patcher/
 !Patcher/**
