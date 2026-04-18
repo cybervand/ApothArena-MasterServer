@@ -4,9 +4,21 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>ApotheonArenaMPpatch</AssemblyName>
+    <AssemblyName>ApotheonArenaMPpatch-harmony</AssemblyName>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="AsmResolver.DotNet" Version="5.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Payload\ApotheonArena.NetworkMod.dll">
+      <LogicalName>ApotheonArena.NetworkMod.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\0Harmony.dll">
+      <LogicalName>0Harmony.dll</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

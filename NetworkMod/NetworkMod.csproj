@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net40</TargetFramework>
+    <AssemblyName>ApotheonArena.NetworkMod</AssemblyName>
+    <RootNamespace>ApotheonArena.NetworkMod</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net40" Version="1.0.3" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>lib\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Lidgren.Network">
+      <HintPath>..\Lidgren.Network.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ApotheonArena">
+      <HintPath>..\ApotheonArena.exe</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+</Project>

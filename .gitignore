@@ -18,6 +18,12 @@ Patcher/publish/
 Patcher/publish-linux/
 Patcher/publish-linux.zip
 
+# NetworkMod source (Harmony mod - built locally, DLL committed to Patcher/Payload/)
+!NetworkMod/
+!NetworkMod/**
+NetworkMod/bin/
+NetworkMod/obj/
+
 # MasterServer source
 !MasterServer/
 !MasterServer/**
