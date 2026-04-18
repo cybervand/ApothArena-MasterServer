@@ -16,9 +16,21 @@ const string ConfigFileName = "master_server.txt";
 const string LocalHostIpFileName = "local_host_ip.txt";
 const string PublicHostIpFileName = "public_host_ip.txt";
 
-if (args.Length == 0)
+bool isInteractive = args.Length == 0;
+
+if (isInteractive)
 {
-    RunInteractiveMenu();
+    try
+    {
+        RunInteractiveMenu();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"Error: {ex.Message}");
+        Console.Error.WriteLine(ex.StackTrace);
+    }
+    PauseBeforeExit();
     return;
 }
 
@@ -102,8 +114,24 @@ void RunInteractiveMenu()
     if (!TryExecuteCommand(choice))
     {
         Console.Error.WriteLine("Unknown option.");
-        Environment.Exit(1);
+        ExitProcess(1);
     }
+}
+
+void ExitProcess(int code)
+{
+    if (isInteractive)
+        PauseBeforeExit();
+    Environment.Exit(code);
+}
+
+void PauseBeforeExit()
+{
+    Console.WriteLine();
+    Console.Write("Press any key to exit...");
+    try { Console.ReadKey(intercept: true); }
+    catch (InvalidOperationException) { Console.ReadLine(); }
+    Console.WriteLine();
 }
 
 void Patch(bool includeRouteAwareLocalIpFix = true)
@@ -112,7 +140,7 @@ void Patch(bool includeRouteAwareLocalIpFix = true)
     if (exePath is null)
     {
         Console.Error.WriteLine($"Could not find {ExeName} - place Patcher.exe in the game folder.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -120,7 +148,7 @@ void Patch(bool includeRouteAwareLocalIpFix = true)
     if (File.Exists(browserBackupPath))
     {
         Console.Error.WriteLine("Browser patch already applied. Run 'Patcher.exe restore' first to unpatch.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -183,6 +211,7 @@ void PatchGameExecutable(string exePath, string backup, bool includeLocalHostIpO
         ApplyGameLocalHostIpOverridePatch(module, exePath);
     ApplyAdvertisedExternalEndpointPatch(module, exePath);
     ApplyEmptyServerListMessagePatch(module);
+    ApplyExceptionLogPatch(module, exePath);
     module.Write(exePath);
 
     Console.WriteLine("Patched ApotheonArena.exe — redirected master server lookups to master_server.txt.");
@@ -280,8 +309,6 @@ void ApplyMasterServerRedirectPatch(ModuleDefinition module, string exePath)
     hi.Add(CilOpCodes.Ret);
 
     helper.CilMethodBody = body;
-    WrapMethodBodyInTryCatch(helper, module,
-        fb => fb.Add(CilOpCodes.Ldstr, OriginalIp));
     body.Instructions.OptimizeMacros();
     networkType.Methods.Add(helper);
 
@@ -467,11 +494,6 @@ void ApplyGameLocalHostIpOverridePatch(ModuleDefinition module, string exePath)
         hi.Add(CilOpCodes.Ret);
 
         preferredIpHelper.CilMethodBody = body;
-        WrapMethodBodyInTryCatch(preferredIpHelper, module, fb =>
-        {
-            fb.Add(CilOpCodes.Ldarg_0);
-            fb.Add(CilOpCodes.Call, getMyAddressMethod);
-        });
         body.Instructions.OptimizeMacros();
         networkType.Methods.Add(preferredIpHelper);
     }
@@ -652,7 +674,6 @@ void ApplyAdvertisedExternalEndpointPatch(ModuleDefinition module, string exePat
         hi.Add(CilOpCodes.Ret);
 
         writeHelper.CilMethodBody = body;
-        WrapMethodBodyInTryCatch(writeHelper, module, _ => { });
         body.Instructions.OptimizeMacros();
         networkType.Methods.Add(writeHelper);
     }
@@ -830,7 +851,7 @@ void PatchSafeLocalHostIpOverride()
     if (dllPath is null)
     {
         Console.Error.WriteLine($"Could not find {LidgrenDllName}.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1565,7 +1586,7 @@ void Restore()
     if (!restoredAny)
     {
         Console.Error.WriteLine("No patch backups found â€” may already be unpatched.");
-        Environment.Exit(1);
+        ExitProcess(1);
     }
 }
 
@@ -1590,7 +1611,7 @@ void InspectType(string typeName)
     if (exePath is null)
     {
         Console.Error.WriteLine($"Could not find {ExeName}.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1599,7 +1620,7 @@ void InspectType(string typeName)
     if (type is null)
     {
         Console.Error.WriteLine($"Type not found: {typeName}");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1618,7 +1639,7 @@ void InspectMethod(string typeName, string methodName)
     if (exePath is null)
     {
         Console.Error.WriteLine($"Could not find {ExeName}.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1627,7 +1648,7 @@ void InspectMethod(string typeName, string methodName)
     if (type is null)
     {
         Console.Error.WriteLine($"Type not found: {typeName}");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1635,7 +1656,7 @@ void InspectMethod(string typeName, string methodName)
     if (methods.Count == 0)
     {
         Console.Error.WriteLine($"Method not found: {type.FullName}::{methodName}");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1687,6 +1708,56 @@ string FormatInspectOperand(object? operand)
         CilInstructionLabel l when l.Instruction is not null => $"-> {l.Instruction.OpCode}",
         _ => operand.ToString() ?? string.Empty
     };
+}
+
+void ApplyExceptionLogPatch(ModuleDefinition module, string exePath)
+{
+    string logPath = Path.Combine(Path.GetDirectoryName(exePath)!, "exception.log");
+    var startType = module.TopLevelTypes.First(t => t.Namespace == "Apotheon" && t.Name == "Start");
+    var crash = startType.Methods.First(m => m.Name == "Crash");
+    var body = crash.CilMethodBody!;
+    var instrs = body.Instructions;
+    if (instrs.Count == 0) return;
+
+    var corlib = module.CorLibTypeFactory;
+    var scope = corlib.CorLibScope;
+    var fileType = new TypeReference(module, scope, "System.IO", "File");
+    var stringType = new TypeReference(module, scope, "System", "String");
+    var objectType = new TypeReference(module, scope, "System", "Object");
+
+    var appendAllText = new MemberReference(fileType, "AppendAllText",
+        MethodSignature.CreateStatic(corlib.Void, corlib.String, corlib.String)).ImportWith(module.DefaultImporter);
+    var stringConcat3 = new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String, corlib.String)).ImportWith(module.DefaultImporter);
+    var objectToString = new MemberReference(objectType, "ToString",
+        MethodSignature.CreateInstance(corlib.String)).ImportWith(module.DefaultImporter);
+
+    var prepend = new List<CilInstruction>
+    {
+        new(CilOpCodes.Ldstr, logPath),
+        new(CilOpCodes.Ldstr, "\r\n=== "),
+        new(CilOpCodes.Ldarg_1),
+        new(CilOpCodes.Ldstr, " ===\r\n"),
+        new(CilOpCodes.Call, stringConcat3),
+        new(CilOpCodes.Call, appendAllText),
+        new(CilOpCodes.Ldstr, logPath),
+        new(CilOpCodes.Ldarg_2),
+        new(CilOpCodes.Callvirt, objectToString),
+        new(CilOpCodes.Ldstr, "\r\n"),
+        new(CilOpCodes.Call, MakeStringConcat2(module, stringType, corlib)),
+        new(CilOpCodes.Call, appendAllText),
+    };
+
+    for (int i = 0; i < prepend.Count; i++)
+        instrs.Insert(i, prepend[i]);
+
+    Console.WriteLine($"Patched ApotheonArena.exe — injected exception logger writing to {Path.GetFileName(logPath)}.");
+}
+
+IMethodDescriptor MakeStringConcat2(ModuleDefinition module, TypeReference stringType, CorLibTypeFactory corlib)
+{
+    return new MemberReference(stringType, "Concat",
+        MethodSignature.CreateStatic(corlib.String, corlib.String, corlib.String)).ImportWith(module.DefaultImporter);
 }
 
 void ApplyEmptyServerListMessagePatch(ModuleDefinition module)
@@ -1752,8 +1823,6 @@ void ApplyEmptyServerListMessagePatch(ModuleDefinition module)
         instrs.Insert(insertIndex + i, popupCode[i]);
 
     body.Instructions.OptimizeMacros();
-
-    Console.WriteLine("Patched ApotheonArena.exe â€” empty server lists now show 'No games available.'");
 }
 
 void Diagnose()
@@ -1762,7 +1831,7 @@ void Diagnose()
     if (exePath is null)
     {
         Console.Error.WriteLine($"Could not find {ExeName}.");
-        Environment.Exit(1); return;
+        ExitProcess(1); return;
     }
 
     string exeDir = Path.GetDirectoryName(exePath)!;
@@ -1781,10 +1850,10 @@ void Undiagnose()
     const string BackupName = "ApotheonArena.exe.diagbak";
 
     string? exePath = FindFile(ExeName);
-    if (exePath is null) { Console.Error.WriteLine($"Could not find {ExeName}."); Environment.Exit(1); return; }
+    if (exePath is null) { Console.Error.WriteLine($"Could not find {ExeName}."); ExitProcess(1); return; }
 
     string backup = Path.Combine(Path.GetDirectoryName(exePath)!, BackupName);
-    if (!File.Exists(backup)) { Console.Error.WriteLine("No diagnose backup found."); Environment.Exit(1); return; }
+    if (!File.Exists(backup)) { Console.Error.WriteLine("No diagnose backup found."); ExitProcess(1); return; }
 
     File.Copy(backup, exePath, overwrite: true);
     File.Delete(backup);
@@ -1799,7 +1868,7 @@ void SafeNetDebug()
     if (exePath is null)
     {
         Console.Error.WriteLine($"Could not find {ExeName}.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1811,14 +1880,14 @@ void SafeNetDebug()
     if (File.Exists(backup))
     {
         Console.Error.WriteLine("Network debug already enabled. Run 'unnetdebug' first.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
     if (legacyBackup is not null && File.Exists(legacyBackup))
     {
         Console.Error.WriteLine("Legacy Lidgren network debug backup found. Run 'unnetdebug' first.");
-        Environment.Exit(1);
+        ExitProcess(1);
         return;
     }
 
@@ -1985,7 +2054,7 @@ void SafeUnNetDebug()
     if (!removedAny)
     {
         Console.Error.WriteLine("Network debug not enabled.");
-        Environment.Exit(1);
+        ExitProcess(1);
     }
 }
 
@@ -1995,14 +2064,14 @@ void NetDebug()
     if (dll is null)
     {
         Console.Error.WriteLine($"Could not find {LidgrenDllName}.");
-        Environment.Exit(1); return;
+        ExitProcess(1); return;
     }
 
     string backup = dll + ".netdebugbak";
     if (File.Exists(backup))
     {
         Console.Error.WriteLine("Network debug already enabled. Run 'unnetdebug' first.");
-        Environment.Exit(1); return;
+        ExitProcess(1); return;
     }
 
     File.Copy(dll, backup);
@@ -2383,10 +2452,10 @@ void NetDebug()
 void UnNetDebug()
 {
     string? dll = FindFile(LidgrenDllName);
-    if (dll is null) { Console.Error.WriteLine($"Could not find {LidgrenDllName}."); Environment.Exit(1); return; }
+    if (dll is null) { Console.Error.WriteLine($"Could not find {LidgrenDllName}."); ExitProcess(1); return; }
 
     string backup = dll + ".netdebugbak";
-    if (!File.Exists(backup)) { Console.Error.WriteLine("Network debug not enabled."); Environment.Exit(1); return; }
+    if (!File.Exists(backup)) { Console.Error.WriteLine("Network debug not enabled."); ExitProcess(1); return; }
 
     File.Copy(backup, dll, overwrite: true);
     File.Delete(backup);
