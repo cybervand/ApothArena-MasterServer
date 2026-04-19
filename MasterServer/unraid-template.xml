@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/cybervand/ApothArena-MasterServer/issues</Support>
   <Project>https://github.com/cybervand/ApothArena-MasterServer</Project>
-  <Overview>Community master server for Apotheon Arena. Listens on UDP 14343 and tracks game hosts for the server browser. Use the companion ApotheonArenaMPpatch on each player's game install to point clients at this server.</Overview>
+  <Overview>Community master server for Apotheon Arena. Tracks active game hosts for the server browser and shows player-friendly startup and activity logs. Use the companion ApotheonArenaMPpatch on each player's game install to point clients at this server.</Overview>
   <Category>GameServers:</Category>
   <WebUI/>
   <TemplateURL/>
@@ -20,5 +20,9 @@
   <DonateText/>
   <DonateLink/>
   <Requires/>
-  <Config Name="Master port" Target="14343" Default="14343" Mode="udp" Description="UDP port the master server listens on" Type="Port" Display="always" Required="true" Mask="false">14343</Config>
+  <Config Name="Master Server Port" Target="MASTER_SERVER_PORT" Default="14343" Mode="" Description="UDP port the master server listens on. Keep 14343 unless every client is patched to use a different master-server port." Type="Variable" Display="always" Required="true" Mask="false">14343</Config>
+  <Config Name="Host Timeout Seconds" Target="HOST_TIMEOUT_SECONDS" Default="30" Mode="" Description="How long a hosted match can miss heartbeats before it is removed from the browser list." Type="Variable" Display="always" Required="true" Mask="false">30</Config>
+  <Config Name="Log Mode" Target="LOG_MODE" Default="player" Mode="" Description="Use 'player' for friendly startup and activity logs. Use 'debug' to keep those logs and also add packet-level Lidgren troubleshooting output." Type="Variable" Display="always" Required="true" Mask="false">player</Config>
+  <Config Name="Data Directory" Target="DATA_DIRECTORY" Default="data" Mode="" Description="Directory shown in startup logs. Relative paths are resolved inside the app folder on both Windows and Linux." Type="Variable" Display="advanced" Required="true" Mask="false">data</Config>
+  <Config Name="Server Display Name" Target="SERVER_DISPLAY_NAME" Default="Apotheon Master Server" Mode="" Description="Name shown in the startup, shutdown, and error banners." Type="Variable" Display="always" Required="true" Mask="false">Apotheon Master Server</Config>
 </Container>

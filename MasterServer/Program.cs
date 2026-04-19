@@ -1,8 +1,12 @@
 using System.Net;
+using System.Reflection;
+using System.Text.Json;
+using System.Threading;
 using Lidgren.Network;
 
-const int Port = 14343;
-const int HostTimeoutSeconds = 30;
+const int DefaultMasterServerPort = 14343;
+const int DefaultHostTimeoutSeconds = 30;
+const string DefaultDataDirectoryName = "data";
 const byte PacketRegister = 0;
 const byte PacketQuit = 1;
 const byte PacketNatIntroRequest = 3;
@@ -11,62 +15,177 @@ const byte PacketDiagPing = 240;
 const byte PacketDiagStatusRequest = 241;
 const byte PacketDiagPong = 242;
 const byte PacketDiagStatusResponse = 243;
+const string AppIdentifier = "Apotheon";
+string serverDisplayName = ResolveDefaultServerDisplayName();
+
+var environmentBootstrap = BootstrapEnvironmentFile();
+string envPath = environmentBootstrap.EnvPath;
+
+if (environmentBootstrap.WasCreated)
+{
+    PrintLifecycleBanner(
+        "No .env file was found.",
+        environmentBootstrap.WasClonedFromExample
+            ? "Cloning .env from .env.example."
+            : "No .env.example file was found, so a default .env was created.");
+}
+
+ServerConfig config;
+try
+{
+    config = LoadConfig();
+    serverDisplayName = ResolveServerDisplayName(config);
+}
+catch (Exception ex)
+{
+    PrintLifecycleBanner(
+        "The server ran into an error during startup.",
+        "Error details:",
+        ex.Message,
+        "Please check the log for more information.");
+    return;
+}
+
+PrintLifecycleBanner(
+    "Welcome!",
+    $"Current configuration ({Path.GetFileName(envPath)})",
+    $"  MASTER_SERVER_PORT={ReadEnvironmentValueForDisplay("MASTER_SERVER_PORT", config.MasterServerPort.ToString())}",
+    $"  HOST_TIMEOUT_SECONDS={ReadEnvironmentValueForDisplay("HOST_TIMEOUT_SECONDS", config.HostTimeoutSeconds.ToString())}",
+    $"  LOG_MODE={ReadEnvironmentValueForDisplay("LOG_MODE", config.LogModeName)}",
+    $"  DATA_DIRECTORY={ReadEnvironmentValueForDisplay("DATA_DIRECTORY", DefaultDataDirectoryName)}",
+    $"  SERVER_DISPLAY_NAME={ReadEnvironmentValueForDisplay("SERVER_DISPLAY_NAME", config.DisplayName)}",
+    "Server is starting up...");
 
 var hosts = new Dictionary<long, HostEntry>();
 long logSequence = 0;
 var startedAtUtc = DateTime.UtcNow;
+var shouldKeepRunning = 1;
+var shutdownAnnounced = 0;
+var shutdownCompleted = 0;
 
-var config = new NetPeerConfiguration("Apotheon") { Port = Port };
-config.EnableMessageType(NetIncomingMessageType.UnconnectedData);
-config.EnableMessageType(NetIncomingMessageType.ErrorMessage);
-config.EnableMessageType(NetIncomingMessageType.WarningMessage);
-config.EnableMessageType(NetIncomingMessageType.DebugMessage);
-config.EnableMessageType(NetIncomingMessageType.VerboseDebugMessage);
-config.EnableMessageType(NetIncomingMessageType.StatusChanged);
-
-var peer = new NetPeer(config);
-peer.Start();
-
-Log("startup", $"Master server running on UDP {Port}");
-Log("startup", $"Host timeout: {HostTimeoutSeconds}s");
-Log("startup", "Detailed packet logging enabled");
-Log("startup", $"Diagnostic packets enabled: ping={PacketDiagPing}, status={PacketDiagStatusRequest}");
-
-while (true)
+void RequestShutdown()
 {
-    try
+    Interlocked.Exchange(ref shouldKeepRunning, 0);
+    if (Interlocked.Exchange(ref shutdownAnnounced, 1) != 0)
+        return;
+
+    PrintLifecycleBanner("The server is shutting down.");
+}
+
+Console.CancelKeyPress += (_, args) =>
+{
+    args.Cancel = true;
+    RequestShutdown();
+};
+
+AppDomain.CurrentDomain.ProcessExit += (_, _) => RequestShutdown();
+
+var peerConfig = new NetPeerConfiguration(AppIdentifier)
+{
+    Port = config.MasterServerPort,
+};
+
+peerConfig.EnableMessageType(NetIncomingMessageType.UnconnectedData);
+peerConfig.EnableMessageType(NetIncomingMessageType.ErrorMessage);
+peerConfig.EnableMessageType(NetIncomingMessageType.WarningMessage);
+peerConfig.EnableMessageType(NetIncomingMessageType.StatusChanged);
+
+if (config.IsDebug)
+{
+    peerConfig.EnableMessageType(NetIncomingMessageType.DebugMessage);
+    peerConfig.EnableMessageType(NetIncomingMessageType.VerboseDebugMessage);
+}
+
+NetPeer? peer = null;
+
+try
+{
+    peer = new NetPeer(peerConfig);
+    peer.Start();
+
+    PrintLifecycleBanner(
+        "The server is up and ready to use!",
+        "Listening for game servers and players.");
+
+    LogDebug("startup", $"Detailed packet logging {(config.IsDebug ? "enabled" : "disabled")}");
+    LogDebug("startup", $"Diagnostic packets enabled: ping={PacketDiagPing}, status={PacketDiagStatusRequest}");
+
+    while (Volatile.Read(ref shouldKeepRunning) == 1)
     {
-        ExpireHosts();
-        ProcessMessages();
+        try
+        {
+            ExpireHosts();
+            ProcessMessages();
+        }
+        catch (Exception ex)
+        {
+            LogError(
+                "The server ran into an error while processing traffic.",
+                "Error details:",
+                ex.Message);
+            LogDebug("loop", ex.ToString());
+        }
+
+        Thread.Sleep(10);
     }
-    catch (Exception ex)
+}
+catch (Exception ex)
+{
+    PrintLifecycleBanner(
+        "The server ran into an error during startup.",
+        "Error details:",
+        ex.Message,
+        "Please check the log for more information.");
+    LogDebug("startup", ex.ToString());
+    return;
+}
+finally
+{
+    if (peer is not null)
     {
-        LogException("loop", ex, "Unhandled exception in main loop");
+        try
+        {
+            peer.Shutdown("Server shutting down");
+        }
+        catch (Exception ex)
+        {
+            LogDebug("shutdown", ex.ToString());
+        }
     }
 
-    Thread.Sleep(10);
+    if (Interlocked.Exchange(ref shutdownCompleted, 1) == 0)
+    {
+        PrintLifecycleBanner("The server has shut down safely.");
+    }
 }
 
 void ExpireHosts()
 {
-    var cutoff = DateTime.UtcNow.AddSeconds(-HostTimeoutSeconds);
+    var cutoff = DateTime.UtcNow.AddSeconds(-config.HostTimeoutSeconds);
     foreach (var id in new List<long>(hosts.Keys))
     {
         var host = hosts[id];
         if (host.LastSeen >= cutoff)
             continue;
 
-        var age = DateTime.UtcNow - host.LastSeen;
-        Log("expire", $"Removing stale host {DescribeHost(host)} age={age.TotalSeconds:F1}s");
         hosts.Remove(id);
-        LogHosts("after-expire");
+
+        LogInfo(
+            "Server removed after missing heartbeats",
+            $"Server ID: {host.Id}",
+            $"Name: {DisplayOrUnknown(host.Info.Name, "Unknown server")}",
+            $"Last known External IP: {DescribeEndPoint(host.ExternalIP)}",
+            $"Last known Reported LAN IP: {DescribeEndPoint(host.InternalIP)}");
+
+        LogDebug("expire", $"Removed stale host {DescribeHost(host)}");
+        LogHostsDebug("after-expire");
     }
 }
 
 void ProcessMessages()
 {
     NetIncomingMessage msg;
-    while ((msg = peer.ReadMessage()) != null)
+    while ((msg = peer!.ReadMessage()) is not null)
     {
         try
         {
@@ -81,31 +200,35 @@ void ProcessMessages()
                 case NetIncomingMessageType.StatusChanged:
                     var status = (NetConnectionStatus)msg.ReadByte();
                     var reason = SafeReadRemainingString(msg);
-                    Log("status", $"StatusChanged sender={DescribeEndPoint(msg.SenderEndPoint)} status={status} reason={Quote(reason)}");
+                    LogDebug("status", $"StatusChanged sender={DescribeEndPoint(msg.SenderEndPoint)} status={status} reason={Quote(reason)}");
                     break;
 
                 case NetIncomingMessageType.ErrorMessage:
                 case NetIncomingMessageType.WarningMessage:
                 case NetIncomingMessageType.DebugMessage:
                 case NetIncomingMessageType.VerboseDebugMessage:
-                    Log("lidgren", $"{msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} text={Quote(SafeReadRemainingString(msg))}");
+                    LogDebug("lidgren", $"{msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} text={Quote(SafeReadRemainingString(msg))}");
                     break;
 
                 default:
-                    Log("message", $"Unhandled message type {msg.MessageType} from {DescribeEndPoint(msg.SenderEndPoint)}");
+                    LogDebug("message", $"Unhandled message type {msg.MessageType} from {DescribeEndPoint(msg.SenderEndPoint)}");
                     break;
             }
         }
         catch (Exception ex)
         {
-            LogException(
+            LogError(
+                "The server ran into an error while reading a message.",
+                "Error details:",
+                ex.Message);
+            LogDebug(
                 "message",
-                ex,
                 $"Failed while processing {msg.MessageType} from {DescribeEndPoint(msg.SenderEndPoint)} pos={msg.PositionInBytes}/{msg.LengthBytes}");
+            LogDebug("message", ex.ToString());
         }
         finally
         {
-            peer.Recycle(msg);
+            peer!.Recycle(msg);
         }
     }
 }
@@ -114,12 +237,12 @@ void HandleUnconnected(NetIncomingMessage msg)
 {
     if (msg.LengthBytes - msg.PositionInBytes < 1)
     {
-        Log("packet", $"Dropped empty unconnected packet from {DescribeEndPoint(msg.SenderEndPoint)}");
+        LogDebug("packet", $"Dropped empty unconnected packet from {DescribeEndPoint(msg.SenderEndPoint)}");
         return;
     }
 
     byte type = msg.ReadByte();
-    Log("packet", $"Decoded {PacketTypeName(type)} from {DescribeEndPoint(msg.SenderEndPoint)} remaining={msg.LengthBytes - msg.PositionInBytes}B");
+    LogDebug("packet", $"Decoded {PacketTypeName(type)} from {DescribeEndPoint(msg.SenderEndPoint)} remaining={msg.LengthBytes - msg.PositionInBytes}B");
 
     switch (type)
     {
@@ -148,7 +271,7 @@ void HandleUnconnected(NetIncomingMessage msg)
             break;
 
         default:
-            Log("packet", $"Unknown unconnected type={type} sender={DescribeEndPoint(msg.SenderEndPoint)}");
+            LogDebug("packet", $"Unknown unconnected type={type} sender={DescribeEndPoint(msg.SenderEndPoint)}");
             break;
     }
 }
@@ -161,71 +284,154 @@ void OnRegister(NetIncomingMessage msg)
     var json = msg.ReadString();
     var reportedExternalRaw = TryReadTrailingString(msg);
     var reportedExternal = TryParseEndPoint(reportedExternalRaw, sender.Port);
-    var effectiveInternal = Sanitize(reportedInternal, sender);
+    var effectiveInternal = Sanitize(reportedInternal, sender, id);
     var effectiveExternal = reportedExternal ?? sender;
-    var externalSource = reportedExternal is null ? "sender" : "reported";
     var extraBytes = msg.LengthBytes - msg.PositionInBytes;
-    bool sanitized = !EndPointsEqual(reportedInternal, effectiveInternal);
     bool isNew = !hosts.ContainsKey(id);
+    var info = ParseServerInfo(json);
 
-    hosts[id] = new HostEntry(id, effectiveInternal, effectiveExternal, json, DateTime.UtcNow);
+    hosts[id] = new HostEntry(id, effectiveInternal, effectiveExternal, json, info, DateTime.UtcNow);
 
-    Log(
+    if (isNew)
+    {
+        LogInfo(
+            "Server came online",
+            $"Server ID: {id}",
+            $"Name: {DisplayOrUnknown(info.Name, "Unknown server")}",
+            $"Map: {DisplayOrUnknown(info.Map, "Unknown map")}",
+            $"Players: {info.Players}/{info.MaxPlayers}",
+            $"External IP: {DescribeEndPoint(effectiveExternal)}",
+            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}");
+    }
+    else
+    {
+        LogInfo(
+            "Server heartbeat received",
+            $"Server ID: {id}",
+            $"Name: {DisplayOrUnknown(info.Name, "Unknown server")}",
+            $"Players: {info.Players}/{info.MaxPlayers}",
+            $"External IP: {DescribeEndPoint(effectiveExternal)}",
+            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}");
+    }
+
+    if (info.ParseIssue is not null)
+    {
+        LogWarning(
+            "Warning: server info could not be read correctly",
+            $"Server ID: {id}",
+            "The server will stay online, but some details may be missing.");
+        LogDebug("json", $"Server info parse issue for id={id}: {info.ParseIssue}");
+    }
+
+    if (IsPrivateIpv4(effectiveExternal.Address))
+    {
+        LogWarning(
+            "Warning: server reported a LAN-only address",
+            $"Server ID: {id}",
+            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}",
+            "Remote players may not be able to connect.");
+    }
+
+    LogDebug(
         isNew ? "register" : "heartbeat",
-        $"{(isNew ? "New host" : "Refresh")} id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} effectiveInt={DescribeEndPoint(effectiveInternal)} reportedExt={Quote(reportedExternalRaw)} effectiveExt={DescribeEndPoint(effectiveExternal)} extSource={externalSource} sanitized={sanitized} jsonLength={json.Length} extraBytes={extraBytes}");
-    Log("register", $"Server info for id={id}: {json}");
-    LogHosts(isNew ? "after-register" : "after-heartbeat");
+        $"{(isNew ? "New host" : "Refresh")} id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} effectiveInt={DescribeEndPoint(effectiveInternal)} reportedExt={Quote(reportedExternalRaw)} effectiveExt={DescribeEndPoint(effectiveExternal)} jsonLength={json.Length} extraBytes={extraBytes}");
+    LogDebug("register", $"Server info for id={id}: {json}");
+    LogHostsDebug(isNew ? "after-register" : "after-heartbeat");
 }
 
 void OnQuit(NetIncomingMessage msg)
 {
     var sender = msg.SenderEndPoint;
-    var internalIp = msg.ReadIPEndPoint();
+    var reportedInternal = msg.ReadIPEndPoint();
     var id = msg.ReadInt64();
     var extraBytes = msg.LengthBytes - msg.PositionInBytes;
-    bool removed = hosts.Remove(id);
 
-    Log("quit", $"Host quit id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(internalIp)} removed={removed} extraBytes={extraBytes}");
-    LogHosts("after-quit");
+    if (hosts.Remove(id, out var removedHost))
+    {
+        LogInfo(
+            "Server went offline",
+            $"Server ID: {id}",
+            $"Name: {DisplayOrUnknown(removedHost.Info.Name, "Unknown server")}",
+            $"External IP: {DescribeEndPoint(removedHost.ExternalIP)}",
+            $"Reported LAN IP: {DescribeEndPoint(removedHost.InternalIP)}");
+    }
+    else
+    {
+        LogInfo(
+            "Server went offline",
+            $"Server ID: {id}",
+            "Name: Unknown server",
+            $"External IP: {DescribeEndPoint(sender)}",
+            $"Reported LAN IP: {DescribeEndPoint(reportedInternal)}");
+    }
+
+    LogDebug("quit", $"Host quit id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} removed={removedHost is not null} extraBytes={extraBytes}");
+    LogHostsDebug("after-quit");
 }
 
 void OnNatIntro(NetIncomingMessage msg)
 {
     var clientExternal = msg.SenderEndPoint;
     var clientReportedInternal = msg.ReadIPEndPoint();
-    var clientInternal = Sanitize(clientReportedInternal, clientExternal);
+    var clientInternal = Sanitize(clientReportedInternal, clientExternal, null);
     var hostId = msg.ReadInt64();
     var token = msg.ReadString();
     var extraBytes = msg.LengthBytes - msg.PositionInBytes;
-    bool sanitized = !EndPointsEqual(clientReportedInternal, clientInternal);
 
-    Log(
-        "nat",
-        $"Request sender={DescribeEndPoint(clientExternal)} hostId={hostId} reportedClientInt={DescribeEndPoint(clientReportedInternal)} effectiveClientInt={DescribeEndPoint(clientInternal)} sanitized={sanitized} token={Quote(token)} extraBytes={extraBytes}");
+    LogInfo(
+        "Player is trying to join a server",
+        "Client:",
+        $"  External IP: {DescribeEndPoint(clientExternal)}",
+        $"  Reported LAN IP: {DescribeEndPoint(clientInternal)}",
+        $"Target Server ID: {hostId}");
 
     if (!hosts.TryGetValue(hostId, out var host))
     {
-        Log("nat", $"Unknown hostId={hostId}; knownHosts={hosts.Count}");
-        LogHosts("nat-miss");
+        LogWarning(
+            "A player tried to join, but that server was no longer online",
+            "Client:",
+            $"  External IP: {DescribeEndPoint(clientExternal)}",
+            $"  Reported LAN IP: {DescribeEndPoint(clientInternal)}",
+            $"Target Server ID: {hostId}");
+        LogHostsDebug("nat-miss");
+        LogDebug("nat", $"Unknown hostId={hostId}; knownHosts={hosts.Count} token={Quote(token)} extraBytes={extraBytes}");
         return;
     }
 
-    Log("nat", $"Introducing client {DescribeEndPoint(clientExternal)} <-> host {DescribeHost(host)}");
-    peer.Introduce(host.InternalIP, host.ExternalIP, clientInternal, clientExternal, token);
-    Log("nat", $"Introduce sent for hostId={hostId} token={Quote(token)}");
+    LogInfo(
+        "Join request sent to host",
+        $"Server ID: {hostId}",
+        $"Host External IP: {DescribeEndPoint(host.ExternalIP)}",
+        $"Host Reported LAN IP: {DescribeEndPoint(host.InternalIP)}",
+        $"Client External IP: {DescribeEndPoint(clientExternal)}",
+        $"Client Reported LAN IP: {DescribeEndPoint(clientInternal)}");
+
+    peer!.Introduce(host.InternalIP, host.ExternalIP, clientInternal, clientExternal, token);
+
+    LogDebug(
+        "nat",
+        $"Request sender={DescribeEndPoint(clientExternal)} hostId={hostId} reportedClientInt={DescribeEndPoint(clientReportedInternal)} effectiveClientInt={DescribeEndPoint(clientInternal)} token={Quote(token)} extraBytes={extraBytes}");
+    LogDebug("nat", $"Introduce sent for hostId={hostId} token={Quote(token)}");
 }
 
 void OnListRequest(NetIncomingMessage msg)
 {
     var client = msg.SenderEndPoint;
-    Log("list", $"List request from {DescribeEndPoint(client)} hostsAvailable={hosts.Count}");
+
+    LogInfo(
+        "Server list checked",
+        "Client:",
+        $"  External IP: {DescribeEndPoint(client)}",
+        hosts.Count == 0
+            ? "Result: no servers available"
+            : $"Result: {hosts.Count} server(s) available");
 
     if (hosts.Count == 0)
     {
-        var empty = peer.CreateMessage();
+        var empty = peer!.CreateMessage();
         empty.Write(false);
         peer.SendUnconnectedMessage(empty, client);
-        Log("list", $"Sent empty list marker to {DescribeEndPoint(client)}");
+        LogDebug("list", $"Sent empty list marker to {DescribeEndPoint(client)}");
         return;
     }
 
@@ -236,22 +442,22 @@ void OnListRequest(NetIncomingMessage msg)
         bool sameSubnet = selectedIp == host.InternalIP.Address.ToString();
         string patchedJson = FixServerInfoIp(host.ServerInfoJson, selectedIp);
 
-        var res = peer.CreateMessage();
-        res.Write(true);
-        res.Write(host.Id);
-        res.Write(host.InternalIP);
-        res.Write(host.ExternalIP);
-        res.Write(patchedJson);
-        res.Write("");
-        peer.SendUnconnectedMessage(res, client);
+        var response = peer.CreateMessage();
+        response.Write(true);
+        response.Write(host.Id);
+        response.Write(host.InternalIP);
+        response.Write(host.ExternalIP);
+        response.Write(patchedJson);
+        response.Write(string.Empty);
+        peer.SendUnconnectedMessage(response, client);
 
         sent++;
-        Log(
+        LogDebug(
             "list",
             $"Sent host id={host.Id} to {DescribeEndPoint(client)} chosenIp={selectedIp} sameSubnet={sameSubnet} hostInt={DescribeEndPoint(host.InternalIP)} hostExt={DescribeEndPoint(host.ExternalIP)} jsonChanged={patchedJson != host.ServerInfoJson}");
     }
 
-    Log("list", $"Completed list response to {DescribeEndPoint(client)} sentHosts={sent}");
+    LogDebug("list", $"Completed list response to {DescribeEndPoint(client)} sentHosts={sent}");
 }
 
 void OnDiagnosticPing(NetIncomingMessage msg)
@@ -260,9 +466,12 @@ void OnDiagnosticPing(NetIncomingMessage msg)
     var nonce = SafeReadRemainingString(msg);
     var uptime = DateTime.UtcNow - startedAtUtc;
 
-    Log("diag", $"Ping request from {DescribeEndPoint(sender)} nonce={Quote(nonce)} uptime={uptime.TotalSeconds:F1}s hosts={hosts.Count}");
+    LogInfo(
+        "Diagnostic ping received",
+        "Client:",
+        $"  External IP: {DescribeEndPoint(sender)}");
 
-    var response = peer.CreateMessage();
+    var response = peer!.CreateMessage();
     response.Write(PacketDiagPong);
     response.Write(nonce);
     response.Write("ApothArena-masterserver");
@@ -271,7 +480,7 @@ void OnDiagnosticPing(NetIncomingMessage msg)
     response.Write(hosts.Count);
     peer.SendUnconnectedMessage(response, sender);
 
-    Log("diag", $"Pong sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)}");
+    LogDebug("diag", $"Pong sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)}");
 }
 
 void OnDiagnosticStatusRequest(NetIncomingMessage msg)
@@ -282,9 +491,13 @@ void OnDiagnosticStatusRequest(NetIncomingMessage msg)
     var uptime = DateTime.UtcNow - startedAtUtc;
     var snapshot = hosts.Values.OrderBy(h => h.Id).ToList();
 
-    Log("diag", $"Status request from {DescribeEndPoint(sender)} nonce={Quote(nonce)} includeHosts={includeHosts} hostCount={snapshot.Count}");
+    LogInfo(
+        "Diagnostic status request received",
+        "Client:",
+        $"  External IP: {DescribeEndPoint(sender)}",
+        $"Include server list: {YesNo(includeHosts)}");
 
-    var response = peer.CreateMessage();
+    var response = peer!.CreateMessage();
     response.Write(PacketDiagStatusResponse);
     response.Write(nonce);
     response.Write(DateTime.UtcNow.ToString("O"));
@@ -311,8 +524,7 @@ void OnDiagnosticStatusRequest(NetIncomingMessage msg)
     }
 
     peer.SendUnconnectedMessage(response, sender);
-
-    Log("diag", $"Status response sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)} includedHosts={includeHosts}");
+    LogDebug("diag", $"Status response sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)} includedHosts={includeHosts}");
 }
 
 string FixServerInfoIp(string json, string replacementIp)
@@ -320,7 +532,7 @@ string FixServerInfoIp(string json, string replacementIp)
     var start = json.IndexOf("\"IPAddress\":\"", StringComparison.Ordinal);
     if (start < 0)
     {
-        Log("json", "Server info JSON did not contain an IPAddress field; leaving payload unchanged");
+        LogDebug("json", "Server info JSON did not contain an IPAddress field; leaving payload unchanged");
         return json;
     }
 
@@ -328,7 +540,7 @@ string FixServerInfoIp(string json, string replacementIp)
     var valueEnd = json.IndexOf('"', valueStart);
     if (valueEnd < 0)
     {
-        Log("json", "Server info JSON had a malformed IPAddress field; leaving payload unchanged");
+        LogDebug("json", "Server info JSON had a malformed IPAddress field; leaving payload unchanged");
         return json;
     }
 
@@ -337,21 +549,21 @@ string FixServerInfoIp(string json, string replacementIp)
 
 string PickIp(IPEndPoint hostInternal, IPEndPoint hostExternal, IPEndPoint client)
 {
-    var h = hostInternal.Address.GetAddressBytes();
-    var c = client.Address.GetAddressBytes();
+    var hostBytes = hostInternal.Address.GetAddressBytes();
+    var clientBytes = client.Address.GetAddressBytes();
     bool sameSubnet =
-        h.Length == 4 &&
-        c.Length == 4 &&
-        h[0] == c[0] &&
-        h[1] == c[1] &&
-        h[2] == c[2];
+        hostBytes.Length == 4 &&
+        clientBytes.Length == 4 &&
+        hostBytes[0] == clientBytes[0] &&
+        hostBytes[1] == clientBytes[1] &&
+        hostBytes[2] == clientBytes[2];
 
     return sameSubnet
         ? hostInternal.Address.ToString()
         : hostExternal.Address.ToString();
 }
 
-IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback)
+IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback, long? hostId)
 {
     var bytes = ep.Address.GetAddressBytes();
     bool linkLocal = bytes.Length == 4 && bytes[0] == 169 && bytes[1] == 254;
@@ -359,22 +571,54 @@ IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback)
         return ep;
 
     var sanitized = new IPEndPoint(fallback.Address, ep.Port);
-    Log("sanitize", $"Replaced link-local endpoint {DescribeEndPoint(ep)} with {DescribeEndPoint(sanitized)}");
+    LogWarning(
+        "Warning: server reported a link-local address",
+        hostId is null ? "Server ID: unknown" : $"Server ID: {hostId}",
+        $"Reported LAN IP: {DescribeEndPoint(ep)}",
+        $"The master server used: {DescribeEndPoint(sanitized)}");
+    LogDebug("sanitize", $"Replaced link-local endpoint {DescribeEndPoint(ep)} with {DescribeEndPoint(sanitized)}");
     return sanitized;
+}
+
+ParsedServerInfo ParseServerInfo(string json)
+{
+    if (string.IsNullOrWhiteSpace(json))
+        return new ParsedServerInfo("Unknown server", "Unknown map", 0, 0, null, "empty payload");
+
+    try
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+
+        return new ParsedServerInfo(
+            GetStringProperty(root, "Name", "Unknown server"),
+            GetStringProperty(root, "Map", "Unknown map"),
+            GetIntProperty(root, "Players"),
+            GetIntProperty(root, "MaxPlayers"),
+            TryGetStringProperty(root, "IPAddress"),
+            null);
+    }
+    catch (Exception ex)
+    {
+        return new ParsedServerInfo("Unknown server", "Unknown map", 0, 0, null, ex.Message);
+    }
 }
 
 void LogIncomingEnvelope(NetIncomingMessage msg)
 {
-    Log(
+    LogDebug(
         "recv",
         $"type={msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} bytes={msg.LengthBytes} seq={msg.SequenceChannel} pos={msg.PositionInBytes}");
 }
 
-void LogHosts(string reason)
+void LogHostsDebug(string reason)
 {
+    if (!config.IsDebug)
+        return;
+
     if (hosts.Count == 0)
     {
-        Log("hosts", $"{reason}: no active hosts");
+        LogDebug("hosts", $"{reason}: no active hosts");
         return;
     }
 
@@ -384,19 +628,257 @@ void LogHosts(string reason)
             .OrderBy(h => h.Id)
             .Select(DescribeHost));
 
-    Log("hosts", $"{reason}: count={hosts.Count} {snapshot}");
+    LogDebug("hosts", $"{reason}: count={hosts.Count} {snapshot}");
 }
 
-void Log(string category, string message)
+void LogInfo(string title, params string[] lines)
 {
+    WriteFriendlyLog(title, lines);
+}
+
+void LogWarning(string title, params string[] lines)
+{
+    WriteFriendlyLog(title, lines);
+}
+
+void LogError(string title, params string[] lines)
+{
+    WriteFriendlyLog(title, lines);
+}
+
+void WriteFriendlyLog(string title, params string[] lines)
+{
+    Console.WriteLine($"{FormatTimestamp()}  {title}");
+    foreach (var line in lines)
+        Console.WriteLine(line);
+}
+
+void LogDebug(string category, string message)
+{
+    if (!config.IsDebug)
+        return;
+
     var sequence = Interlocked.Increment(ref logSequence);
-    Console.WriteLine($"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z [{sequence:D6}] [{category}] {message}");
+    Console.WriteLine($"{FormatTimestamp()} [{sequence:D6}] [{category}] {message}");
 }
 
-void LogException(string category, Exception ex, string context)
+void PrintLifecycleBanner(params string[] lines)
 {
-    Log(category, $"{context} exception={ex.GetType().Name} message={Quote(ex.Message)}");
-    Log(category, ex.ToString());
+    Console.WriteLine(FormatTimestamp());
+    Console.WriteLine($"------------ {serverDisplayName} ------------");
+    foreach (var line in lines)
+        Console.WriteLine(line);
+    Console.WriteLine($"------------ {serverDisplayName} ------------");
+}
+
+string ResolveServerDisplayName(ServerConfig config)
+{
+    return string.IsNullOrWhiteSpace(config.DisplayName)
+        ? ResolveDefaultServerDisplayName()
+        : config.DisplayName;
+}
+
+string ResolveDefaultServerDisplayName()
+{
+    var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+    var product = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product;
+    var title = assembly.GetCustomAttribute<AssemblyTitleAttribute>()?.Title;
+
+    if (!string.IsNullOrWhiteSpace(product))
+        return product;
+
+    if (!string.IsNullOrWhiteSpace(title))
+        return title;
+
+    return assembly.GetName().Name ?? "MasterServer";
+}
+
+ServerConfig LoadConfig()
+{
+    int masterServerPort = ReadIntEnvironmentVariable("MASTER_SERVER_PORT", DefaultMasterServerPort, 1, 65535);
+    int hostTimeoutSeconds = ReadIntEnvironmentVariable("HOST_TIMEOUT_SECONDS", DefaultHostTimeoutSeconds, 5, 3600);
+    var logMode = ReadLogModeEnvironmentVariable("LOG_MODE");
+    var dataDirectory = ReadDataDirectory();
+    string displayName = ReadEnvironmentValueForDisplay("SERVER_DISPLAY_NAME", ResolveDefaultServerDisplayName());
+
+    return new ServerConfig(masterServerPort, hostTimeoutSeconds, logMode, dataDirectory, displayName);
+}
+
+EnvironmentBootstrapResult BootstrapEnvironmentFile()
+{
+    string envDirectory = ResolveEnvironmentDirectory();
+    string envPath = Path.Combine(envDirectory, ".env");
+    string examplePath = Path.Combine(envDirectory, ".env.example");
+    bool wasCreated = false;
+    bool wasClonedFromExample = false;
+
+    if (!File.Exists(envPath))
+    {
+        wasCreated = true;
+        if (File.Exists(examplePath))
+        {
+            File.Copy(examplePath, envPath);
+            wasClonedFromExample = true;
+        }
+        else
+        {
+            File.WriteAllLines(
+                envPath,
+                new[]
+                {
+                    "# UDP port the master server listens on.",
+                    $"MASTER_SERVER_PORT={DefaultMasterServerPort}",
+                    string.Empty,
+                    "# Remove hosts after this many seconds without a heartbeat.",
+                    $"HOST_TIMEOUT_SECONDS={DefaultHostTimeoutSeconds}",
+                    string.Empty,
+                    "# player = friendly startup/activity logs for operators",
+                    "# debug  = player logs plus packet-level Lidgren/network tracing",
+                    "LOG_MODE=player",
+                    string.Empty,
+                    "# Relative paths are resolved inside the app folder.",
+                    $"DATA_DIRECTORY={DefaultDataDirectoryName}",
+                    string.Empty,
+                    "# Name shown in startup, shutdown, and error banners.",
+                    $"SERVER_DISPLAY_NAME={ResolveDefaultServerDisplayName()}",
+                });
+        }
+    }
+
+    LoadEnvironmentFile(envPath);
+    return new EnvironmentBootstrapResult(envPath, wasCreated, wasClonedFromExample);
+}
+
+string ResolveEnvironmentDirectory()
+{
+    var candidates = new[]
+    {
+        AppContext.BaseDirectory,
+        Environment.CurrentDirectory,
+        Path.Combine(Environment.CurrentDirectory, "MasterServer"),
+    };
+
+    foreach (var candidate in candidates)
+    {
+        if (string.IsNullOrWhiteSpace(candidate) || !Directory.Exists(candidate))
+            continue;
+
+        if (File.Exists(Path.Combine(candidate, ".env")) || File.Exists(Path.Combine(candidate, ".env.example")))
+            return candidate;
+    }
+
+    return AppContext.BaseDirectory;
+}
+
+void LoadEnvironmentFile(string envPath)
+{
+    if (!File.Exists(envPath))
+        return;
+
+    foreach (var rawLine in File.ReadAllLines(envPath))
+    {
+        var line = rawLine.Trim();
+        if (line.Length == 0 || line.StartsWith('#'))
+            continue;
+
+        int separatorIndex = line.IndexOf('=');
+        if (separatorIndex <= 0)
+            continue;
+
+        string key = line[..separatorIndex].Trim();
+        string value = line[(separatorIndex + 1)..].Trim();
+        if (key.Length == 0 || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(key)))
+            continue;
+
+        if (value.Length >= 2 && value.StartsWith('"') && value.EndsWith('"'))
+            value = value[1..^1];
+
+        Environment.SetEnvironmentVariable(key, value);
+    }
+}
+
+string ReadEnvironmentValueForDisplay(string name, string fallback)
+{
+    var raw = Environment.GetEnvironmentVariable(name);
+    return string.IsNullOrWhiteSpace(raw) ? fallback : raw.Trim();
+}
+
+int ReadIntEnvironmentVariable(string name, int fallback, int minValue, int maxValue)
+{
+    var raw = Environment.GetEnvironmentVariable(name);
+    if (string.IsNullOrWhiteSpace(raw))
+        return fallback;
+
+    if (!int.TryParse(raw, out var value) || value < minValue || value > maxValue)
+        throw new InvalidOperationException($"{name} must be a number between {minValue} and {maxValue}.");
+
+    return value;
+}
+
+LogMode ReadLogModeEnvironmentVariable(string name)
+{
+    var raw = Environment.GetEnvironmentVariable(name);
+    if (string.IsNullOrWhiteSpace(raw))
+        return LogMode.Player;
+
+    return raw.Trim().ToLowerInvariant() switch
+    {
+        "player" => LogMode.Player,
+        "debug" => LogMode.Debug,
+        _ => throw new InvalidOperationException($"{name} must be either 'player' or 'debug'."),
+    };
+}
+
+string ReadDataDirectory()
+{
+    var raw = Environment.GetEnvironmentVariable("DATA_DIRECTORY");
+    var path = !string.IsNullOrWhiteSpace(raw)
+        ? raw.Trim()
+        : DefaultDataDirectoryName;
+
+    if (!Path.IsPathRooted(path))
+        path = Path.GetFullPath(Path.Combine(ResolveEnvironmentDirectory(), path));
+
+    Directory.CreateDirectory(path);
+    return path;
+}
+
+int GetIntProperty(JsonElement root, string name)
+{
+    if (root.TryGetProperty(name, out var value))
+    {
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
+            return number;
+
+        if (value.ValueKind == JsonValueKind.String &&
+            int.TryParse(value.GetString(), out number))
+        {
+            return number;
+        }
+    }
+
+    return 0;
+}
+
+string GetStringProperty(JsonElement root, string name, string fallback)
+{
+    var value = TryGetStringProperty(root, name);
+    return string.IsNullOrWhiteSpace(value) ? fallback : value;
+}
+
+string? TryGetStringProperty(JsonElement root, string name)
+{
+    if (!root.TryGetProperty(name, out var value))
+        return null;
+
+    return value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString(),
+        JsonValueKind.Number => value.GetRawText(),
+        JsonValueKind.True => bool.TrueString,
+        JsonValueKind.False => bool.FalseString,
+        _ => null,
+    };
 }
 
 string DescribeHost(HostEntry host)
@@ -410,9 +892,31 @@ string DescribeEndPoint(IPEndPoint? ep)
     return ep is null ? "<null>" : $"{ep.Address}:{ep.Port}";
 }
 
-bool EndPointsEqual(IPEndPoint a, IPEndPoint b)
+bool IsPrivateIpv4(IPAddress address)
 {
-    return a.Port == b.Port && Equals(a.Address, b.Address);
+    var bytes = address.GetAddressBytes();
+    if (bytes.Length != 4)
+        return false;
+
+    return
+        bytes[0] == 10 ||
+        (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+        (bytes[0] == 192 && bytes[1] == 168);
+}
+
+string DisplayOrUnknown(string? value, string fallback)
+{
+    return string.IsNullOrWhiteSpace(value) ? fallback : value;
+}
+
+string FormatTimestamp()
+{
+    return $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z";
+}
+
+string YesNo(bool value)
+{
+    return value ? "yes" : "no";
 }
 
 string PacketTypeName(byte type)
@@ -478,7 +982,7 @@ IPEndPoint? TryParseEndPoint(string? raw, int defaultPort)
             port = defaultPort;
     }
 
-    return IPAddress.TryParse(ipPart, out var addr) ? new IPEndPoint(addr, port) : null;
+    return IPAddress.TryParse(ipPart, out var address) ? new IPEndPoint(address, port) : null;
 }
 
 string Quote(string? value)
@@ -486,4 +990,26 @@ string Quote(string? value)
     return value is null ? "<null>" : $"\"{value}\"";
 }
 
-record HostEntry(long Id, IPEndPoint InternalIP, IPEndPoint ExternalIP, string ServerInfoJson, DateTime LastSeen);
+record ServerConfig(int MasterServerPort, int HostTimeoutSeconds, LogMode LogMode, string DataDirectory, string DisplayName)
+{
+    public bool IsDebug => LogMode == LogMode.Debug;
+    public string LogModeName => LogMode == LogMode.Debug ? "debug" : "player";
+}
+
+record EnvironmentBootstrapResult(string EnvPath, bool WasCreated, bool WasClonedFromExample);
+
+enum LogMode
+{
+    Player,
+    Debug,
+}
+
+record ParsedServerInfo(string Name, string Map, int Players, int MaxPlayers, string? AdvertisedIp, string? ParseIssue);
+
+record HostEntry(
+    long Id,
+    IPEndPoint InternalIP,
+    IPEndPoint ExternalIP,
+    string ServerInfoJson,
+    ParsedServerInfo Info,
+    DateTime LastSeen);

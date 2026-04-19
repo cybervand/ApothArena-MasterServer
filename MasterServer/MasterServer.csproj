@@ -5,8 +5,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>MasterServer</AssemblyName>
+    <AssemblyTitle>Apotheon Master Server</AssemblyTitle>
+    <Product>Apotheon Master Server</Product>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Lidgren.Network" Version="0.2.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include=".env.example">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 </Project>

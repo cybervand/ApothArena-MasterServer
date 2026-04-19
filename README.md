@@ -76,7 +76,7 @@ Run `restore` first if you need to re-patch.
 
 ### Requirements
 
-- Linux host with Docker and Docker Compose (Unraid, Ubuntu, Debian, etc.)
+- Windows or Linux machine with .NET 8, or a Linux host with Docker and Docker Compose (Unraid, Ubuntu, Debian, etc.)
 - UDP port **14343** open and reachable from the internet
 
 ### Deploying
@@ -84,6 +84,7 @@ Run `restore` first if you need to re-patch.
 ```bash
 git clone https://github.com/your-username/ApothArena-masterserver
 cd ApothArena-masterserver/MasterServer
+cp .env.example .env
 docker compose up -d --build
 ```
 
@@ -91,6 +92,66 @@ The server listens on UDP port 14343 and requires `network_mode: host` (already
 set in `docker-compose.yml`) so it can see real client IPs for NAT hole punching.
 Do not run it behind Docker bridge networking — clients will fail to connect to
 each other.
+
+Docker Compose with `network_mode: host` is mainly a Linux and Unraid deployment
+path. The master server application itself runs on both Windows and Linux, so if
+you are hosting on Windows it is usually simpler to run the app directly with
+`.NET 8` instead of Docker.
+
+### Running directly on Windows or Linux
+
+From the repo root:
+
+```bash
+dotnet run --project MasterServer/MasterServer.csproj
+```
+
+Or publish a standalone build:
+
+```bash
+dotnet publish MasterServer/MasterServer.csproj -c Release -o MasterServer/publish
+```
+
+Then run the published app:
+
+**Windows**
+```powershell
+.\MasterServer\publish\MasterServer.exe
+```
+
+**Linux**
+```bash
+./MasterServer/publish/MasterServer
+```
+
+When the server starts for the first time, it creates a real `.env` file next to
+the app if one does not exist already. Relative `DATA_DIRECTORY` values such as
+`data` are resolved inside the app folder on both Windows and Linux.
+
+### Configuration
+
+The master server reads a small set of environment variables at startup. Copy
+[`MasterServer/.env.example`](MasterServer/.env.example) to `.env` and adjust
+values there before launching with Docker Compose.
+
+- `MASTER_SERVER_PORT`: UDP port for the master server. Keep `14343` unless all
+  game clients are patched to use a different master-server port.
+- `HOST_TIMEOUT_SECONDS`: how long a host can miss heartbeats before it is
+  removed from the active list.
+- `LOG_MODE`: `player` for friendly startup and activity logs that read like a
+  server dashboard. Use `debug` when troubleshooting networking, because it
+  keeps the player-friendly logs and also adds packet-level Lidgren traces.
+- `DATA_DIRECTORY`: path shown in the startup banner. Relative values such as
+  `data` work on both Windows and Linux.
+- `SERVER_DISPLAY_NAME`: name shown in the startup, shutdown, and error banners.
+
+At startup the server prints the effective configuration and then switches to
+player-friendly activity logs such as:
+
+- `Server came online`
+- `Server list checked`
+- `Player is trying to join a server`
+- `Server went offline`
 
 ### Updating
 

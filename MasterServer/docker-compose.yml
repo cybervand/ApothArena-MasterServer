@@ -4,6 +4,12 @@ services:
     container_name: apotharena-masterserver
     restart: unless-stopped
     network_mode: host
+    environment:
+      MASTER_SERVER_PORT: ${MASTER_SERVER_PORT:-14343}
+      HOST_TIMEOUT_SECONDS: ${HOST_TIMEOUT_SECONDS:-30}
+      LOG_MODE: ${LOG_MODE:-player}
+      DATA_DIRECTORY: ${DATA_DIRECTORY:-data}
+      SERVER_DISPLAY_NAME: ${SERVER_DISPLAY_NAME:-Apotheon Master Server}
     logging:
       driver: json-file
       options:
