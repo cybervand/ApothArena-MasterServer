@@ -1,9 +1,9 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
 WORKDIR /src
-COPY MasterServer.csproj .
-COPY .env.example .
+COPY MasterServer/ ./MasterServer/
+COPY Shared/ ./Shared/
+WORKDIR /src/MasterServer
 RUN dotnet restore
-COPY Program.cs .
 RUN dotnet publish -c Release -o /publish
 
 FROM mcr.microsoft.com/dotnet/runtime:8.0-alpine

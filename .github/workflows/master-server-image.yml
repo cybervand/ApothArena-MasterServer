@@ -50,7 +50,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./MasterServer
+          context: .
           file: ./MasterServer/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
