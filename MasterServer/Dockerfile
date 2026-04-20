@@ -9,7 +9,6 @@ RUN dotnet publish -c Release -o /publish
 FROM mcr.microsoft.com/dotnet/runtime:8.0-alpine
 WORKDIR /app
 COPY --from=build /publish .
-COPY .env.example ./.env.example
 ENV MASTER_SERVER_PORT=14343
 ENV HOST_TIMEOUT_SECONDS=30
 ENV LOG_MODE=player
