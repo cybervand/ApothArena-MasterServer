@@ -9,4 +9,7 @@
   <ItemGroup>
     <PackageReference Include="Lidgren.Network" Version="0.2.*" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Shared\MasterLog.cs" Link="Shared\MasterLog.cs" />
+  </ItemGroup>
 </Project>

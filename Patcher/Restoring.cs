@@ -1,3 +1,4 @@
+using System.Xml.Linq;
 using static Constants;
 
 internal static class Restoring
@@ -43,8 +44,8 @@ internal static class Restoring
         {
             string exeDir = Path.GetDirectoryName(exePath)!;
             string browserBackup = exePath + ".browserbak";
-            string netdebugBackup = Path.Combine(exeDir, "ApotheonArena.exe.netdebugbak");
-            string diagnoseBackup = Path.Combine(exeDir, "ApotheonArena.exe.diagbak");
+            string netdebugBackup = exePath + ".netdebugbak";
+            string diagnoseBackup = exePath + ".diagbak";
             if (File.Exists(browserBackup))
             {
                 File.Copy(browserBackup, exePath, overwrite: true);
@@ -64,15 +65,42 @@ internal static class Restoring
                 restoredAny = true;
             }
 
-            foreach (string modFile in new[] { "ApotheonArena.NetworkMod.dll", "0Harmony.dll" })
+            string modsDir = Path.Combine(exeDir, ModsDirectoryName);
+            foreach (string modFile in new[]
             {
-                string modPath = Path.Combine(exeDir, modFile);
+                "0Harmony.dll",
+                "ApotheonArena.NetworkMod.dll",
+                NetworkConfigFileName,
+            })
+            {
+                string modPath = Path.Combine(modsDir, modFile);
                 if (File.Exists(modPath))
                 {
                     File.Delete(modPath);
-                    Console.WriteLine($"Removed mod file {modFile}.");
+                    Console.WriteLine($"Removed {ModsDirectoryName}/{modFile}.");
                     restoredAny = true;
                 }
+
+                string legacyPath = Path.Combine(exeDir, modFile);
+                if (File.Exists(legacyPath))
+                {
+                    File.Delete(legacyPath);
+                    Console.WriteLine($"Removed legacy {modFile} from game root.");
+                    restoredAny = true;
+                }
+            }
+
+            if (Directory.Exists(modsDir) &&
+                Directory.GetFileSystemEntries(modsDir).Length == 0)
+            {
+                Directory.Delete(modsDir);
+                Console.WriteLine($"Removed empty {ModsDirectoryName}/ folder.");
+            }
+
+            if (RemoveProbingPath(exeDir))
+            {
+                Console.WriteLine($"Removed probing privatePath=\"{ModsDirectoryName}\" from {ExeName}.config.");
+                restoredAny = true;
             }
         }
 
@@ -81,5 +109,47 @@ internal static class Restoring
             Console.Error.WriteLine("No patch backups found - may already be unpatched.");
             Cli.Exit(1);
         }
+    }
+
+    static bool RemoveProbingPath(string gameDir)
+    {
+        string configPath = Path.Combine(gameDir, ExeName + ".config");
+        if (!File.Exists(configPath)) return false;
+
+        XDocument doc;
+        try { doc = XDocument.Load(configPath); }
+        catch { return false; }
+
+        if (doc.Root is null) return false;
+
+        bool changed = false;
+        foreach (XElement binding in doc.Root.Descendants()
+            .Where(e => e.Name.LocalName == "assemblyBinding")
+            .ToList())
+        {
+            var toRemove = binding.Elements()
+                .Where(e => e.Name.LocalName == "probing" &&
+                            string.Equals((string?)e.Attribute("privatePath"), ModsDirectoryName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var probing in toRemove)
+            {
+                probing.Remove();
+                changed = true;
+            }
+
+            if (!binding.HasElements)
+                binding.Remove();
+        }
+
+        if (!changed) return false;
+
+        foreach (XElement runtime in doc.Root.Elements("runtime").ToList())
+        {
+            if (!runtime.HasElements)
+                runtime.Remove();
+        }
+
+        doc.Save(configPath);
+        return true;
     }
 }

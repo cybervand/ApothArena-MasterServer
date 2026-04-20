@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
+using ApotheonArena.Shared;
 using Lidgren.Network;
 
 const int DefaultMasterServerPort = 14343;
@@ -35,6 +36,7 @@ try
 {
     config = LoadConfig();
     serverDisplayName = ResolveServerDisplayName(config);
+    MasterLog.Enabled = config.IsDebug;
 }
 catch (Exception ex)
 {
@@ -57,7 +59,6 @@ PrintLifecycleBanner(
     "Server is starting up...");
 
 var hosts = new Dictionary<long, HostEntry>();
-long logSequence = 0;
 var startedAtUtc = DateTime.UtcNow;
 var shouldKeepRunning = 1;
 var shutdownAnnounced = 0;
@@ -107,8 +108,8 @@ try
         "The server is up and ready to use!",
         "Listening for game servers and players.");
 
-    LogDebug("startup", $"Detailed packet logging {(config.IsDebug ? "enabled" : "disabled")}");
-    LogDebug("startup", $"Diagnostic packets enabled: ping={PacketDiagPing}, status={PacketDiagStatusRequest}");
+    MasterLog.FromSelf(MasterLogTag.Server,$"debug-mode | detailed-packet-logging={(config.IsDebug ? "enabled" : "disabled")}");
+    MasterLog.FromSelf(MasterLogTag.Server,$"diagnostics-enabled | ping={PacketDiagPing} | status={PacketDiagStatusRequest}");
 
     while (Volatile.Read(ref shouldKeepRunning) == 1)
     {
@@ -123,7 +124,7 @@ try
                 "The server ran into an error while processing traffic.",
                 "Error details:",
                 ex.Message);
-            LogDebug("loop", ex.ToString());
+            MasterLog.SelfError(MasterLogTag.Server, ex.ToString());
         }
 
         Thread.Sleep(10);
@@ -136,7 +137,7 @@ catch (Exception ex)
         "Error details:",
         ex.Message,
         "Please check the log for more information.");
-    LogDebug("startup", ex.ToString());
+    MasterLog.SelfError(MasterLogTag.Server, ex.ToString());
     return;
 }
 finally
@@ -149,7 +150,7 @@ finally
         }
         catch (Exception ex)
         {
-            LogDebug("shutdown", ex.ToString());
+            MasterLog.SelfError(MasterLogTag.Server, ex.ToString());
         }
     }
 
@@ -174,10 +175,10 @@ void ExpireHosts()
             "Server removed after missing heartbeats",
             $"Server ID: {host.Id}",
             $"Name: {DisplayOrUnknown(host.Info.Name, "Unknown server")}",
-            $"Last known External IP: {DescribeEndPoint(host.ExternalIP)}",
-            $"Last known Reported LAN IP: {DescribeEndPoint(host.InternalIP)}");
+            $"Last known External IP: {MasterLog.Describe(host.ExternalIP)}",
+            $"Last known Reported LAN IP: {MasterLog.Describe(host.InternalIP)}");
 
-        LogDebug("expire", $"Removed stale host {DescribeHost(host)}");
+        MasterLog.FromSelf(MasterLogTag.Server,$"remove-stale-host | {DescribeHost(host)}");
         LogHostsDebug("after-expire");
     }
 }
@@ -189,8 +190,6 @@ void ProcessMessages()
     {
         try
         {
-            LogIncomingEnvelope(msg);
-
             switch (msg.MessageType)
             {
                 case NetIncomingMessageType.UnconnectedData:
@@ -200,18 +199,18 @@ void ProcessMessages()
                 case NetIncomingMessageType.StatusChanged:
                     var status = (NetConnectionStatus)msg.ReadByte();
                     var reason = SafeReadRemainingString(msg);
-                    LogDebug("status", $"StatusChanged sender={DescribeEndPoint(msg.SenderEndPoint)} status={status} reason={Quote(reason)}");
+                    MasterLog.SelfLidgren(MasterLogTag.Server,$"status-changed | sender={MasterLog.Describe(msg.SenderEndPoint)} | status={status} | reason={MasterLog.Quote(reason)}");
                     break;
 
                 case NetIncomingMessageType.ErrorMessage:
                 case NetIncomingMessageType.WarningMessage:
                 case NetIncomingMessageType.DebugMessage:
                 case NetIncomingMessageType.VerboseDebugMessage:
-                    LogDebug("lidgren", $"{msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} text={Quote(SafeReadRemainingString(msg))}");
+                    MasterLog.SelfLidgren(MasterLogTag.Server,$"library-message | type={msg.MessageType} | sender={MasterLog.Describe(msg.SenderEndPoint)} | text={MasterLog.Quote(SafeReadRemainingString(msg))}");
                     break;
 
                 default:
-                    LogDebug("message", $"Unhandled message type {msg.MessageType} from {DescribeEndPoint(msg.SenderEndPoint)}");
+                    MasterLog.SelfLidgren(MasterLogTag.Server,$"unhandled-message | type={msg.MessageType} | sender={MasterLog.Describe(msg.SenderEndPoint)}");
                     break;
             }
         }
@@ -221,10 +220,10 @@ void ProcessMessages()
                 "The server ran into an error while reading a message.",
                 "Error details:",
                 ex.Message);
-            LogDebug(
-                "message",
-                $"Failed while processing {msg.MessageType} from {DescribeEndPoint(msg.SenderEndPoint)} pos={msg.PositionInBytes}/{msg.LengthBytes}");
-            LogDebug("message", ex.ToString());
+            MasterLog.SelfError(
+                MasterLogTag.Server,
+                $"processing-failed | type={msg.MessageType} | sender={MasterLog.Describe(msg.SenderEndPoint)} | pos={msg.PositionInBytes}/{msg.LengthBytes}");
+            MasterLog.SelfError(MasterLogTag.Server, ex.ToString());
         }
         finally
         {
@@ -237,12 +236,12 @@ void HandleUnconnected(NetIncomingMessage msg)
 {
     if (msg.LengthBytes - msg.PositionInBytes < 1)
     {
-        LogDebug("packet", $"Dropped empty unconnected packet from {DescribeEndPoint(msg.SenderEndPoint)}");
+        MasterLog.FromSelf(MasterLogTag.Server,$"drop-empty-packet | sender={MasterLog.Describe(msg.SenderEndPoint)}");
         return;
     }
 
     byte type = msg.ReadByte();
-    LogDebug("packet", $"Decoded {PacketTypeName(type)} from {DescribeEndPoint(msg.SenderEndPoint)} remaining={msg.LengthBytes - msg.PositionInBytes}B");
+    MasterLog.FromSelf(MasterLogTag.Server,$"decode-packet | type={PacketTypeName(type)} | sender={MasterLog.Describe(msg.SenderEndPoint)} | remaining={msg.LengthBytes - msg.PositionInBytes}B");
 
     switch (type)
     {
@@ -271,7 +270,7 @@ void HandleUnconnected(NetIncomingMessage msg)
             break;
 
         default:
-            LogDebug("packet", $"Unknown unconnected type={type} sender={DescribeEndPoint(msg.SenderEndPoint)}");
+            MasterLog.FromSelf(MasterLogTag.Server,$"unknown-packet-type | raw={type} | sender={MasterLog.Describe(msg.SenderEndPoint)}");
             break;
     }
 }
@@ -300,8 +299,8 @@ void OnRegister(NetIncomingMessage msg)
             $"Name: {DisplayOrUnknown(info.Name, "Unknown server")}",
             $"Map: {DisplayOrUnknown(info.Map, "Unknown map")}",
             $"Players: {info.Players}/{info.MaxPlayers}",
-            $"External IP: {DescribeEndPoint(effectiveExternal)}",
-            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}");
+            $"External IP: {MasterLog.Describe(effectiveExternal)}",
+            $"Reported LAN IP: {MasterLog.Describe(effectiveInternal)}");
     }
     else
     {
@@ -310,8 +309,8 @@ void OnRegister(NetIncomingMessage msg)
             $"Server ID: {id}",
             $"Name: {DisplayOrUnknown(info.Name, "Unknown server")}",
             $"Players: {info.Players}/{info.MaxPlayers}",
-            $"External IP: {DescribeEndPoint(effectiveExternal)}",
-            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}");
+            $"External IP: {MasterLog.Describe(effectiveExternal)}",
+            $"Reported LAN IP: {MasterLog.Describe(effectiveInternal)}");
     }
 
     if (info.ParseIssue is not null)
@@ -320,7 +319,7 @@ void OnRegister(NetIncomingMessage msg)
             "Warning: server info could not be read correctly",
             $"Server ID: {id}",
             "The server will stay online, but some details may be missing.");
-        LogDebug("json", $"Server info parse issue for id={id}: {info.ParseIssue}");
+        MasterLog.FromPeer(MasterLogTag.Host,$"server-info-parse-issue | serverId={id} | reason={MasterLog.Quote(info.ParseIssue)}");
     }
 
     if (IsPrivateIpv4(effectiveExternal.Address))
@@ -328,14 +327,16 @@ void OnRegister(NetIncomingMessage msg)
         LogWarning(
             "Warning: server reported a LAN-only address",
             $"Server ID: {id}",
-            $"Reported LAN IP: {DescribeEndPoint(effectiveInternal)}",
+            $"Reported LAN IP: {MasterLog.Describe(effectiveInternal)}",
             "Remote players may not be able to connect.");
     }
 
-    LogDebug(
-        isNew ? "register" : "heartbeat",
-        $"{(isNew ? "New host" : "Refresh")} id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} effectiveInt={DescribeEndPoint(effectiveInternal)} reportedExt={Quote(reportedExternalRaw)} effectiveExt={DescribeEndPoint(effectiveExternal)} jsonLength={json.Length} extraBytes={extraBytes}");
-    LogDebug("register", $"Server info for id={id}: {json}");
+    MasterLog.FromPeer(
+        MasterLogTag.Host,
+        $"{(isNew ? "new-host" : "refresh")} | serverId={id} | sender={MasterLog.Describe(sender)} | reportedInt={MasterLog.Describe(reportedInternal)} | effectiveInt={MasterLog.Describe(effectiveInternal)} | reportedExt={MasterLog.Quote(reportedExternalRaw)} | effectiveExt={MasterLog.Describe(effectiveExternal)} | jsonLength={json.Length} | extraBytes={extraBytes}");
+    MasterLog.FromPeer(
+        MasterLogTag.Host,
+        $"server-info | serverId={id} | name={MasterLog.Quote(info.Name)} | map={MasterLog.Quote(info.Map)} | players={info.Players}/{info.MaxPlayers} | advertisedIp={MasterLog.Quote(info.AdvertisedIp)}");
     LogHostsDebug(isNew ? "after-register" : "after-heartbeat");
 }
 
@@ -352,8 +353,8 @@ void OnQuit(NetIncomingMessage msg)
             "Server went offline",
             $"Server ID: {id}",
             $"Name: {DisplayOrUnknown(removedHost.Info.Name, "Unknown server")}",
-            $"External IP: {DescribeEndPoint(removedHost.ExternalIP)}",
-            $"Reported LAN IP: {DescribeEndPoint(removedHost.InternalIP)}");
+            $"External IP: {MasterLog.Describe(removedHost.ExternalIP)}",
+            $"Reported LAN IP: {MasterLog.Describe(removedHost.InternalIP)}");
     }
     else
     {
@@ -361,11 +362,11 @@ void OnQuit(NetIncomingMessage msg)
             "Server went offline",
             $"Server ID: {id}",
             "Name: Unknown server",
-            $"External IP: {DescribeEndPoint(sender)}",
-            $"Reported LAN IP: {DescribeEndPoint(reportedInternal)}");
+            $"External IP: {MasterLog.Describe(sender)}",
+            $"Reported LAN IP: {MasterLog.Describe(reportedInternal)}");
     }
 
-    LogDebug("quit", $"Host quit id={id} sender={DescribeEndPoint(sender)} reportedInt={DescribeEndPoint(reportedInternal)} removed={removedHost is not null} extraBytes={extraBytes}");
+    MasterLog.FromPeer(MasterLogTag.Host,$"host-quit | serverId={id} | sender={MasterLog.Describe(sender)} | reportedInt={MasterLog.Describe(reportedInternal)} | removed={MasterLog.YesNo(removedHost is not null)} | extraBytes={extraBytes}");
     LogHostsDebug("after-quit");
 }
 
@@ -381,8 +382,8 @@ void OnNatIntro(NetIncomingMessage msg)
     LogInfo(
         "Player is trying to join a server",
         "Client:",
-        $"  External IP: {DescribeEndPoint(clientExternal)}",
-        $"  Reported LAN IP: {DescribeEndPoint(clientInternal)}",
+        $"  External IP: {MasterLog.Describe(clientExternal)}",
+        $"  Reported LAN IP: {MasterLog.Describe(clientInternal)}",
         $"Target Server ID: {hostId}");
 
     if (!hosts.TryGetValue(hostId, out var host))
@@ -390,28 +391,29 @@ void OnNatIntro(NetIncomingMessage msg)
         LogWarning(
             "A player tried to join, but that server was no longer online",
             "Client:",
-            $"  External IP: {DescribeEndPoint(clientExternal)}",
-            $"  Reported LAN IP: {DescribeEndPoint(clientInternal)}",
+            $"  External IP: {MasterLog.Describe(clientExternal)}",
+            $"  Reported LAN IP: {MasterLog.Describe(clientInternal)}",
             $"Target Server ID: {hostId}");
         LogHostsDebug("nat-miss");
-        LogDebug("nat", $"Unknown hostId={hostId}; knownHosts={hosts.Count} token={Quote(token)} extraBytes={extraBytes}");
+        MasterLog.FromPeer(MasterLogTag.Client,$"target-missing | hostId={hostId} | knownHosts={hosts.Count} | token={MasterLog.Quote(token)} | extraBytes={extraBytes}");
         return;
     }
 
     LogInfo(
         "Join request sent to host",
         $"Server ID: {hostId}",
-        $"Host External IP: {DescribeEndPoint(host.ExternalIP)}",
-        $"Host Reported LAN IP: {DescribeEndPoint(host.InternalIP)}",
-        $"Client External IP: {DescribeEndPoint(clientExternal)}",
-        $"Client Reported LAN IP: {DescribeEndPoint(clientInternal)}");
+        $"Host External IP: {MasterLog.Describe(host.ExternalIP)}",
+        $"Host Reported LAN IP: {MasterLog.Describe(host.InternalIP)}",
+        $"Client External IP: {MasterLog.Describe(clientExternal)}",
+        $"Client Reported LAN IP: {MasterLog.Describe(clientInternal)}");
 
     peer!.Introduce(host.InternalIP, host.ExternalIP, clientInternal, clientExternal, token);
 
-    LogDebug(
-        "nat",
-        $"Request sender={DescribeEndPoint(clientExternal)} hostId={hostId} reportedClientInt={DescribeEndPoint(clientReportedInternal)} effectiveClientInt={DescribeEndPoint(clientInternal)} token={Quote(token)} extraBytes={extraBytes}");
-    LogDebug("nat", $"Introduce sent for hostId={hostId} token={Quote(token)}");
+    MasterLog.FromPeer(
+        MasterLogTag.Client,
+        $"intro-request | sender={MasterLog.Describe(clientExternal)} | hostId={hostId} | reportedClientInt={MasterLog.Describe(clientReportedInternal)} | effectiveClientInt={MasterLog.Describe(clientInternal)} | token={MasterLog.Quote(token)} | extraBytes={extraBytes}");
+    MasterLog.ToPeer(MasterLogTag.Host, $"introduce | hostId={hostId} | hostExternal={MasterLog.Describe(host.ExternalIP)} | hostInternal={MasterLog.Describe(host.InternalIP)} | clientExternal={MasterLog.Describe(clientExternal)} | clientInternal={MasterLog.Describe(clientInternal)} | token={MasterLog.Quote(token)}");
+    MasterLog.ToPeer(MasterLogTag.Client, $"introduce | hostId={hostId} | hostExternal={MasterLog.Describe(host.ExternalIP)} | hostInternal={MasterLog.Describe(host.InternalIP)} | clientExternal={MasterLog.Describe(clientExternal)} | clientInternal={MasterLog.Describe(clientInternal)} | token={MasterLog.Quote(token)}");
 }
 
 void OnListRequest(NetIncomingMessage msg)
@@ -421,7 +423,7 @@ void OnListRequest(NetIncomingMessage msg)
     LogInfo(
         "Server list checked",
         "Client:",
-        $"  External IP: {DescribeEndPoint(client)}",
+        $"  External IP: {MasterLog.Describe(client)}",
         hosts.Count == 0
             ? "Result: no servers available"
             : $"Result: {hosts.Count} server(s) available");
@@ -431,7 +433,7 @@ void OnListRequest(NetIncomingMessage msg)
         var empty = peer!.CreateMessage();
         empty.Write(false);
         peer.SendUnconnectedMessage(empty, client);
-        LogDebug("list", $"Sent empty list marker to {DescribeEndPoint(client)}");
+        MasterLog.ToPeer(MasterLogTag.Client, $"unconnected-send | kind=empty-list | client={MasterLog.Describe(client)}");
         return;
     }
 
@@ -452,12 +454,12 @@ void OnListRequest(NetIncomingMessage msg)
         peer.SendUnconnectedMessage(response, client);
 
         sent++;
-        LogDebug(
-            "list",
-            $"Sent host id={host.Id} to {DescribeEndPoint(client)} chosenIp={selectedIp} sameSubnet={sameSubnet} hostInt={DescribeEndPoint(host.InternalIP)} hostExt={DescribeEndPoint(host.ExternalIP)} jsonChanged={patchedJson != host.ServerInfoJson}");
+        MasterLog.ToPeer(
+            MasterLogTag.Client,
+            $"unconnected-send | kind=list-entry | serverId={host.Id} | client={MasterLog.Describe(client)} | chosenIp={selectedIp} | sameSubnet={MasterLog.YesNo(sameSubnet)} | hostInt={MasterLog.Describe(host.InternalIP)} | hostExt={MasterLog.Describe(host.ExternalIP)} | jsonChanged={MasterLog.YesNo(patchedJson != host.ServerInfoJson)}");
     }
 
-    LogDebug("list", $"Completed list response to {DescribeEndPoint(client)} sentHosts={sent}");
+    MasterLog.FromSelf(MasterLogTag.Server,$"list-response-complete | client={MasterLog.Describe(client)} | sentHosts={sent}");
 }
 
 void OnDiagnosticPing(NetIncomingMessage msg)
@@ -469,7 +471,7 @@ void OnDiagnosticPing(NetIncomingMessage msg)
     LogInfo(
         "Diagnostic ping received",
         "Client:",
-        $"  External IP: {DescribeEndPoint(sender)}");
+        $"  External IP: {MasterLog.Describe(sender)}");
 
     var response = peer!.CreateMessage();
     response.Write(PacketDiagPong);
@@ -480,7 +482,7 @@ void OnDiagnosticPing(NetIncomingMessage msg)
     response.Write(hosts.Count);
     peer.SendUnconnectedMessage(response, sender);
 
-    LogDebug("diag", $"Pong sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)}");
+    MasterLog.ToPeer(MasterLogTag.Client, $"unconnected-send | kind=diag-pong | client={MasterLog.Describe(sender)} | nonce={MasterLog.Quote(nonce)}");
 }
 
 void OnDiagnosticStatusRequest(NetIncomingMessage msg)
@@ -494,8 +496,8 @@ void OnDiagnosticStatusRequest(NetIncomingMessage msg)
     LogInfo(
         "Diagnostic status request received",
         "Client:",
-        $"  External IP: {DescribeEndPoint(sender)}",
-        $"Include server list: {YesNo(includeHosts)}");
+        $"  External IP: {MasterLog.Describe(sender)}",
+        $"Include server list: {MasterLog.YesNo(includeHosts)}");
 
     var response = peer!.CreateMessage();
     response.Write(PacketDiagStatusResponse);
@@ -512,8 +514,8 @@ void OnDiagnosticStatusRequest(NetIncomingMessage msg)
         {
             var age = DateTime.UtcNow - host.LastSeen;
             response.Write(host.Id);
-            response.Write(DescribeEndPoint(host.ExternalIP));
-            response.Write(DescribeEndPoint(host.InternalIP));
+            response.Write(MasterLog.Describe(host.ExternalIP));
+            response.Write(MasterLog.Describe(host.InternalIP));
             response.Write((int)Math.Round(age.TotalSeconds));
             response.Write(host.ServerInfoJson);
         }
@@ -524,7 +526,7 @@ void OnDiagnosticStatusRequest(NetIncomingMessage msg)
     }
 
     peer.SendUnconnectedMessage(response, sender);
-    LogDebug("diag", $"Status response sent to {DescribeEndPoint(sender)} nonce={Quote(nonce)} includedHosts={includeHosts}");
+    MasterLog.ToPeer(MasterLogTag.Client, $"unconnected-send | kind=diag-status | client={MasterLog.Describe(sender)} | nonce={MasterLog.Quote(nonce)} | includeHosts={MasterLog.YesNo(includeHosts)}");
 }
 
 string FixServerInfoIp(string json, string replacementIp)
@@ -532,7 +534,7 @@ string FixServerInfoIp(string json, string replacementIp)
     var start = json.IndexOf("\"IPAddress\":\"", StringComparison.Ordinal);
     if (start < 0)
     {
-        LogDebug("json", "Server info JSON did not contain an IPAddress field; leaving payload unchanged");
+        MasterLog.FromSelf(MasterLogTag.Server,"json-patch-skip | reason=no-ipaddress-field");
         return json;
     }
 
@@ -540,7 +542,7 @@ string FixServerInfoIp(string json, string replacementIp)
     var valueEnd = json.IndexOf('"', valueStart);
     if (valueEnd < 0)
     {
-        LogDebug("json", "Server info JSON had a malformed IPAddress field; leaving payload unchanged");
+        MasterLog.FromSelf(MasterLogTag.Server,"json-patch-skip | reason=malformed-ipaddress-field");
         return json;
     }
 
@@ -574,9 +576,9 @@ IPEndPoint Sanitize(IPEndPoint ep, IPEndPoint fallback, long? hostId)
     LogWarning(
         "Warning: server reported a link-local address",
         hostId is null ? "Server ID: unknown" : $"Server ID: {hostId}",
-        $"Reported LAN IP: {DescribeEndPoint(ep)}",
-        $"The master server used: {DescribeEndPoint(sanitized)}");
-    LogDebug("sanitize", $"Replaced link-local endpoint {DescribeEndPoint(ep)} with {DescribeEndPoint(sanitized)}");
+        $"Reported LAN IP: {MasterLog.Describe(ep)}",
+        $"The master server used: {MasterLog.Describe(sanitized)}");
+    MasterLog.FromSelf(MasterLogTag.Server,$"replace-link-local | original={MasterLog.Describe(ep)} | replacement={MasterLog.Describe(sanitized)}");
     return sanitized;
 }
 
@@ -604,13 +606,6 @@ ParsedServerInfo ParseServerInfo(string json)
     }
 }
 
-void LogIncomingEnvelope(NetIncomingMessage msg)
-{
-    LogDebug(
-        "recv",
-        $"type={msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} bytes={msg.LengthBytes} seq={msg.SequenceChannel} pos={msg.PositionInBytes}");
-}
-
 void LogHostsDebug(string reason)
 {
     if (!config.IsDebug)
@@ -618,7 +613,7 @@ void LogHostsDebug(string reason)
 
     if (hosts.Count == 0)
     {
-        LogDebug("hosts", $"{reason}: no active hosts");
+        MasterLog.FromSelf(MasterLogTag.Server,$"hosts-snapshot | reason={reason} | count=0");
         return;
     }
 
@@ -628,7 +623,7 @@ void LogHostsDebug(string reason)
             .OrderBy(h => h.Id)
             .Select(DescribeHost));
 
-    LogDebug("hosts", $"{reason}: count={hosts.Count} {snapshot}");
+    MasterLog.FromSelf(MasterLogTag.Server,$"hosts-snapshot | reason={reason} | count={hosts.Count} | hosts={snapshot}");
 }
 
 void LogInfo(string title, params string[] lines)
@@ -648,23 +643,14 @@ void LogError(string title, params string[] lines)
 
 void WriteFriendlyLog(string title, params string[] lines)
 {
-    Console.WriteLine($"{FormatTimestamp()}  {title}");
+    Console.WriteLine($"{MasterLog.FormatTimestamp()}  {title}");
     foreach (var line in lines)
         Console.WriteLine(line);
 }
 
-void LogDebug(string category, string message)
-{
-    if (!config.IsDebug)
-        return;
-
-    var sequence = Interlocked.Increment(ref logSequence);
-    Console.WriteLine($"{FormatTimestamp()} [{sequence:D6}] [{category}] {message}");
-}
-
 void PrintLifecycleBanner(params string[] lines)
 {
-    Console.WriteLine(FormatTimestamp());
+    Console.WriteLine(MasterLog.FormatTimestamp());
     Console.WriteLine($"------------ {serverDisplayName} ------------");
     foreach (var line in lines)
         Console.WriteLine(line);
@@ -884,12 +870,7 @@ string? TryGetStringProperty(JsonElement root, string name)
 string DescribeHost(HostEntry host)
 {
     var age = DateTime.UtcNow - host.LastSeen;
-    return $"id={host.Id} ext={DescribeEndPoint(host.ExternalIP)} int={DescribeEndPoint(host.InternalIP)} age={age.TotalSeconds:F1}s";
-}
-
-string DescribeEndPoint(IPEndPoint? ep)
-{
-    return ep is null ? "<null>" : $"{ep.Address}:{ep.Port}";
+    return $"id={host.Id} ext={MasterLog.Describe(host.ExternalIP)} int={MasterLog.Describe(host.InternalIP)} age={age.TotalSeconds:F1}s";
 }
 
 bool IsPrivateIpv4(IPAddress address)
@@ -907,16 +888,6 @@ bool IsPrivateIpv4(IPAddress address)
 string DisplayOrUnknown(string? value, string fallback)
 {
     return string.IsNullOrWhiteSpace(value) ? fallback : value;
-}
-
-string FormatTimestamp()
-{
-    return $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z";
-}
-
-string YesNo(bool value)
-{
-    return value ? "yes" : "no";
 }
 
 string PacketTypeName(byte type)
@@ -983,11 +954,6 @@ IPEndPoint? TryParseEndPoint(string? raw, int defaultPort)
     }
 
     return IPAddress.TryParse(ipPart, out var address) ? new IPEndPoint(address, port) : null;
-}
-
-string Quote(string? value)
-{
-    return value is null ? "<null>" : $"\"{value}\"";
 }
 
 record ServerConfig(int MasterServerPort, int HostTimeoutSeconds, LogMode LogMode, string DataDirectory, string DisplayName)

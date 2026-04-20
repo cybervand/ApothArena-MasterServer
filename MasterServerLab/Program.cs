@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using ApotheonArena.Shared;
 using Lidgren.Network;
 
 const string AppIdentifier = "Apotheon";
@@ -33,9 +34,9 @@ var parsed = ParseCommonArgs(args.Skip(2));
 ApplyScenario(command, parsed);
 var master = ResolveTarget(masterHost, parsed.MasterPort);
 
-Log($"master={master.Address}:{master.Port} command={command}");
+MasterLog.FromSelf(MasterLogTag.Game, $"startup | master={master.Address}:{master.Port} | command={command}");
 if (!string.IsNullOrWhiteSpace(parsed.Scenario))
-    Log($"scenario={parsed.Scenario}");
+    MasterLog.FromSelf(MasterLogTag.Game, $"scenario | name={parsed.Scenario}");
 
 switch (command)
 {
@@ -55,7 +56,7 @@ switch (command)
         break;
 }
 
-static void RunHost(IPEndPoint master, ParsedArgs args)
+void RunHost(IPEndPoint master, ParsedArgs args)
 {
     var hostPort = args.GamePort <= 0 ? 14242 : args.GamePort;
     var peer = CreatePeer(hostPort, enableNatMessages: false);
@@ -73,9 +74,9 @@ static void RunHost(IPEndPoint master, ParsedArgs args)
     var end = DateTime.UtcNow.AddSeconds(durationSeconds);
     var lastSent = DateTime.MinValue;
 
-    Log($"host-id={hostId}");
-    Log($"reported-internal={DescribeEndPoint(reportedInternal)} actual-local={DescribeEndPoint(internalIp)}");
-    Log($"duration={durationSeconds}s heartbeat={heartbeatMs}ms");
+    MasterLog.FromSelf(
+        MasterLogTag.Host,
+        $"host-setup | hostId={hostId} | reportedInternal={MasterLog.Describe(reportedInternal)} | actualLocal={MasterLog.Describe(internalIp)} | durationSeconds={durationSeconds} | heartbeatMs={heartbeatMs}");
 
     try
     {
@@ -90,7 +91,7 @@ static void RunHost(IPEndPoint master, ParsedArgs args)
                 packet.Write(BuildServerInfoJson(reportIp, reportPort, hostId, name, map, players, maxPlayers));
                 peer.SendUnconnectedMessage(packet, master);
                 lastSent = DateTime.UtcNow;
-                Log($"sent register/heartbeat to {DescribeEndPoint(master)}");
+                MasterLog.ToPeer(MasterLogTag.Server, $"unconnected-send | kind=register-heartbeat | target={MasterLog.Describe(master)}");
             }
 
             DrainMessages(peer, "host");
@@ -102,7 +103,7 @@ static void RunHost(IPEndPoint master, ParsedArgs args)
         quit.Write(reportedInternal);
         quit.Write(hostId);
         peer.SendUnconnectedMessage(quit, master);
-        Log("sent quit");
+        MasterLog.ToPeer(MasterLogTag.Server, $"unconnected-send | kind=quit | target={MasterLog.Describe(master)}");
     }
     finally
     {
@@ -110,7 +111,7 @@ static void RunHost(IPEndPoint master, ParsedArgs args)
     }
 }
 
-static void RunBrowse(IPEndPoint master, ParsedArgs args)
+void RunBrowse(IPEndPoint master, ParsedArgs args)
 {
     var peer = CreatePeer(0, enableNatMessages: false);
     var timeoutMs = args.TimeoutMs ?? 3000;
@@ -121,7 +122,7 @@ static void RunBrowse(IPEndPoint master, ParsedArgs args)
         var packet = peer.CreateMessage();
         packet.Write(PacketListRequest);
         peer.SendUnconnectedMessage(packet, master);
-        Log($"sent list request to {DescribeEndPoint(master)}");
+        MasterLog.ToPeer(MasterLogTag.Server, $"unconnected-send | kind=list-request | target={MasterLog.Describe(master)}");
 
         var servers = 0;
         while (DateTime.UtcNow < deadline)
@@ -143,7 +144,7 @@ static void RunBrowse(IPEndPoint master, ParsedArgs args)
                 var hasServer = msg.ReadBoolean();
                 if (!hasServer)
                 {
-                    Log("browse received explicit empty-list response from master server");
+                    MasterLog.FromPeer(MasterLogTag.Server, "list-entry | role=browse | kind=empty-list");
                     continue;
                 }
 
@@ -154,8 +155,12 @@ static void RunBrowse(IPEndPoint master, ParsedArgs args)
                 var country = msg.ReadString();
                 servers++;
 
-                Log($"server[{servers}] hasServer={hasServer} id={hostId} int={DescribeEndPoint(internalIp)} ext={DescribeEndPoint(externalIp)} country={Quote(country)}");
-                Log($"server[{servers}] info={json}");
+                MasterLog.FromPeer(
+                    MasterLogTag.Server,
+                    $"list-entry | role=browse | index={servers} | serverId={hostId} | int={MasterLog.Describe(internalIp)} | ext={MasterLog.Describe(externalIp)} | country={MasterLog.Quote(country)}");
+                MasterLog.FromPeer(
+                    MasterLogTag.Server,
+                    $"server-info | role=browse | serverId={hostId} | json={json}");
             }
             finally
             {
@@ -163,7 +168,7 @@ static void RunBrowse(IPEndPoint master, ParsedArgs args)
             }
         }
 
-        Log($"browse complete, received {servers} server entries");
+        MasterLog.FromSelf(MasterLogTag.Client, $"browse-complete | entries={servers}");
     }
     finally
     {
@@ -171,7 +176,7 @@ static void RunBrowse(IPEndPoint master, ParsedArgs args)
     }
 }
 
-static void RunJoin(IPEndPoint master, ParsedArgs args)
+void RunJoin(IPEndPoint master, ParsedArgs args)
 {
     if (args.HostId is null)
     {
@@ -191,8 +196,9 @@ static void RunJoin(IPEndPoint master, ParsedArgs args)
     var token = args.Token ?? Guid.NewGuid().ToString("N");
     var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
 
-    Log($"join host-id={args.HostId.Value} token={token}");
-    Log($"reported-internal={DescribeEndPoint(reportedInternal)} actual-local={DescribeEndPoint(localIp)}");
+    MasterLog.FromSelf(
+        MasterLogTag.Client,
+        $"join-setup | hostId={args.HostId.Value} | token={token} | reportedInternal={MasterLog.Describe(reportedInternal)} | actualLocal={MasterLog.Describe(localIp)}");
 
     try
     {
@@ -202,7 +208,7 @@ static void RunJoin(IPEndPoint master, ParsedArgs args)
         packet.Write(args.HostId.Value);
         packet.Write(token);
         peer.SendUnconnectedMessage(packet, master);
-        Log($"sent nat-intro request to {DescribeEndPoint(master)}");
+        MasterLog.ToPeer(MasterLogTag.Server, $"unconnected-send | kind=nat-intro-request | target={MasterLog.Describe(master)}");
 
         while (DateTime.UtcNow < deadline)
         {
@@ -216,7 +222,9 @@ static void RunJoin(IPEndPoint master, ParsedArgs args)
             {
                 if (msg.MessageType == NetIncomingMessageType.UnconnectedData)
                 {
-                    Log($"join received unconnected data bytes={msg.LengthBytes} from {DescribeEndPoint(msg.SenderEndPoint)}");
+                    MasterLog.SelfLidgren(
+                        MasterLogTag.Client,
+                        $"unconnected-data | role=join | bytes={msg.LengthBytes} | sender={MasterLog.Describe(msg.SenderEndPoint)}");
                     continue;
                 }
 
@@ -228,7 +236,7 @@ static void RunJoin(IPEndPoint master, ParsedArgs args)
             }
         }
 
-        Log("join observation window ended");
+        MasterLog.FromSelf(MasterLogTag.Client, "join-observation-complete");
     }
     finally
     {
@@ -447,7 +455,7 @@ static bool TryReadMessage(NetPeer peer, out NetIncomingMessage? message)
     return message is not null;
 }
 
-static void DrainMessages(NetPeer peer, string role)
+void DrainMessages(NetPeer peer, string role)
 {
     while (TryReadMessage(peer, out var msg) && msg is not null)
     {
@@ -462,34 +470,46 @@ static void DrainMessages(NetPeer peer, string role)
     }
 }
 
-static void PrintSystemMessage(NetIncomingMessage msg, string role)
+void PrintSystemMessage(NetIncomingMessage msg, string role)
 {
+    var selfTag = role == "host" ? MasterLogTag.Host : MasterLogTag.Client;
+
     switch (msg.MessageType)
     {
         case NetIncomingMessageType.WarningMessage:
         case NetIncomingMessageType.ErrorMessage:
         case NetIncomingMessageType.DebugMessage:
         case NetIncomingMessageType.VerboseDebugMessage:
-            Log($"{role} {msg.MessageType}: {SafeReadRemainingString(msg)}");
+            MasterLog.SelfLidgren(
+                selfTag,
+                $"library-message | role={role} | type={msg.MessageType} | text={MasterLog.Quote(SafeReadRemainingString(msg))}");
             break;
         case NetIncomingMessageType.StatusChanged:
             var status = (NetConnectionStatus)msg.ReadByte();
-            Log($"{role} status: {status} reason={Quote(SafeReadRemainingString(msg))}");
+            MasterLog.SelfLidgren(
+                selfTag,
+                $"status-changed | role={role} | status={status} | reason={MasterLog.Quote(SafeReadRemainingString(msg))}");
             break;
         case NetIncomingMessageType.NatIntroductionSuccess:
             try
             {
                 var endpoint = msg.ReadIPEndPoint();
                 var token = SafeReadRemainingString(msg);
-                Log($"{role} nat-success: endpoint={DescribeEndPoint(endpoint)} token={Quote(token)}");
+                MasterLog.FromPeer(
+                    MasterLogTag.Host,
+                    $"nat-success | role={role} | endpoint={MasterLog.Describe(endpoint)} | token={MasterLog.Quote(token)}");
             }
             catch (Exception ex)
             {
-                Log($"{role} nat-success: could not parse payload ({ex.GetType().Name}: {ex.Message}) bytes={msg.LengthBytes}");
+                MasterLog.SelfError(
+                    selfTag,
+                    $"nat-success-parse-issue | role={role} | error={ex.GetType().Name}:{ex.Message} | bytes={msg.LengthBytes}");
             }
             break;
         default:
-            Log($"{role} message-type={msg.MessageType} sender={DescribeEndPoint(msg.SenderEndPoint)} bytes={msg.LengthBytes}");
+            MasterLog.SelfLidgren(
+                selfTag,
+                $"unhandled-message | role={role} | type={msg.MessageType} | sender={MasterLog.Describe(msg.SenderEndPoint)} | bytes={msg.LengthBytes}");
             break;
     }
 }
@@ -554,21 +574,6 @@ static string SafeReadRemainingString(NetIncomingMessage msg)
     {
         return "<unreadable>";
     }
-}
-
-static void Log(string message)
-{
-    Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss.fff}Z {message}");
-}
-
-static string DescribeEndPoint(IPEndPoint? endpoint)
-{
-    return endpoint is null ? "<null>" : $"{endpoint.Address}:{endpoint.Port}";
-}
-
-static string Quote(string? value)
-{
-    return value is null ? "<null>" : $"\"{value}\"";
 }
 
 static void PrintUsage()

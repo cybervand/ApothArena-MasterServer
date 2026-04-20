@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -9,12 +8,23 @@ using Lidgren.Network;
 
 namespace ApotheonArena.NetworkMod.Patches
 {
+    internal static class NetworkRole
+    {
+        [ThreadStatic] public static bool IsHosting;
+        [ThreadStatic] public static bool IsJoining;
+    }
+
     [HarmonyPatch(typeof(NetUtility), "Resolve", new[] { typeof(string) })]
     static class Resolve_String_Patch
     {
-        static bool Prefix(ref string ipOrHost)
+        static bool Prefix(string ipOrHost, ref IPAddress __result)
         {
-            ipOrHost = MasterServer.Redirect(ipOrHost);
+            IPAddress cached;
+            if (MasterServer.TryResolveCached(ipOrHost, out cached))
+            {
+                __result = cached;
+                return false;
+            }
             return true;
         }
     }
@@ -22,9 +32,14 @@ namespace ApotheonArena.NetworkMod.Patches
     [HarmonyPatch(typeof(NetUtility), "Resolve", new[] { typeof(string), typeof(int) })]
     static class Resolve_StringInt_Patch
     {
-        static bool Prefix(ref string ipOrHost)
+        static bool Prefix(string ipOrHost, int port, ref IPEndPoint __result)
         {
-            ipOrHost = MasterServer.Redirect(ipOrHost);
+            IPAddress cached;
+            if (MasterServer.TryResolveCached(ipOrHost, out cached))
+            {
+                __result = new IPEndPoint(cached, port);
+                return false;
+            }
             return true;
         }
     }
@@ -39,42 +54,88 @@ namespace ApotheonArena.NetworkMod.Patches
                 IPAddress picked = LocalIp.Pick(__result);
                 if (picked != null && !Equals(picked, __result))
                 {
-                    ModLoader.Log("GetMyAddress override: " + __result + " -> " + picked);
+                    NetworkModLog.FromSelf(RoleTag(),
+                        "local-address-override | from=" + __result + " to=" + picked);
                     __result = picked;
                 }
+
+                if (NetworkRole.IsHosting && __result != null)
+                    NetworkConfig.RecordDetectedHostIp(__result.ToString());
+                if (NetworkRole.IsJoining && __result != null)
+                    NetworkConfig.RecordDetectedClientIp(__result.ToString());
             }
             catch (Exception ex)
             {
-                ModLoader.Log("GetMyAddress postfix error: " + ex.Message);
+                NetworkModLog.SelfError(RoleTag(), "local-address-override-failed | " + ex.Message);
             }
+        }
+
+        static string RoleTag()
+        {
+            if (NetworkRole.IsHosting) return NetworkModLogTag.Host;
+            if (NetworkRole.IsJoining) return NetworkModLogTag.Client;
+            return NetworkModLogTag.Game;
         }
     }
 
     internal static class MasterServer
     {
         const string OriginalIp = "50.19.227.23";
-        const string ConfigFile = "master_server.txt";
 
-        public static string Redirect(string input)
+        static readonly object _lock = new object();
+        static string _cachedKey;
+        static IPAddress _cachedAddress;
+        static string _loggedTarget;
+
+        public static bool TryResolveCached(string input, out IPAddress address)
         {
-            if (string.IsNullOrEmpty(input)) return input;
-            if (input.Trim() != OriginalIp) return input;
+            address = null;
+            if (string.IsNullOrEmpty(input) || input.Trim() != OriginalIp)
+                return false;
 
-            string configured = ReadConfigLine(Path.Combine(ModLoader.BaseDirectory, ConfigFile));
-            if (string.IsNullOrEmpty(configured)) return input;
+            string configured = NetworkConfig.MasterServer;
+            if (string.IsNullOrEmpty(configured) || configured == OriginalIp)
+                return false;
 
-            ModLoader.Log("Resolve redirect: " + OriginalIp + " -> " + configured);
-            return configured;
+            lock (_lock)
+            {
+                if (_cachedKey != configured)
+                {
+                    _cachedAddress = ResolveFresh(configured);
+                    _cachedKey = configured;
+                }
+
+                if (_cachedAddress == null)
+                    return false;
+
+                if (_loggedTarget != configured)
+                {
+                    _loggedTarget = configured;
+                    NetworkModLog.FromSelf(NetworkModLogTag.Game,
+                        "resolve-redirect | from=" + OriginalIp + " to=" + configured
+                        + " resolved=" + _cachedAddress);
+                }
+
+                address = _cachedAddress;
+                return true;
+            }
         }
 
-        static string ReadConfigLine(string path)
+        static IPAddress ResolveFresh(string target)
         {
-            if (!File.Exists(path)) return null;
-            foreach (string raw in File.ReadAllLines(path))
+            IPAddress parsed;
+            if (IPAddress.TryParse(target, out parsed))
+                return parsed;
+            try
             {
-                string line = raw.Trim();
-                if (line.Length == 0 || line[0] == '#') continue;
-                return line;
+                foreach (IPAddress a in Dns.GetHostAddresses(target))
+                    if (a.AddressFamily == AddressFamily.InterNetwork)
+                        return a;
+            }
+            catch (Exception ex)
+            {
+                NetworkModLog.SelfError(NetworkModLogTag.Game,
+                    "resolve-redirect-failed | target=" + target + " | " + ex.Message);
             }
             return null;
         }
@@ -82,33 +143,22 @@ namespace ApotheonArena.NetworkMod.Patches
 
     internal static class LocalIp
     {
-        const string OverrideFile = "local_host_ip.txt";
-
         public static IPAddress Pick(IPAddress fallback)
         {
-            IPAddress configured = ReadOverrideFile();
-            if (configured != null) return configured;
+            string configuredOverride = NetworkRole.IsHosting ? NetworkConfig.HostIp
+                                       : NetworkRole.IsJoining ? NetworkConfig.ClientIp
+                                       : null;
+            if (!string.IsNullOrEmpty(configuredOverride))
+            {
+                IPAddress parsed;
+                if (IPAddress.TryParse(configuredOverride, out parsed)) return parsed;
+                try { return NetUtility.Resolve(configuredOverride); } catch { }
+            }
 
             IPAddress best = PickBestInterface();
             if (best != null) return best;
 
             return fallback;
-        }
-
-        static IPAddress ReadOverrideFile()
-        {
-            string path = Path.Combine(ModLoader.BaseDirectory, OverrideFile);
-            if (!File.Exists(path)) return null;
-            foreach (string raw in File.ReadAllLines(path))
-            {
-                string line = raw.Trim();
-                if (line.Length == 0 || line[0] == '#') continue;
-                IPAddress parsed;
-                if (IPAddress.TryParse(line, out parsed)) return parsed;
-                try { return NetUtility.Resolve(line); } catch { }
-                return null;
-            }
-            return null;
         }
 
         static IPAddress PickBestInterface()

@@ -18,56 +18,64 @@ namespace ApotheonArena.NetworkMod
 
             try
             {
-                Log("Starting");
+                NetworkModLog.FromSelf(NetworkModLogTag.Game, "mod-starting");
+                NetworkConfig.Load();
+
+                if (NetworkConfig.ShowConsole)
+                {
+                    ConsoleMirror.Enable("Apotheon NetworkMod Log");
+                    NetworkModLog.FromSelf(NetworkModLogTag.Game,
+                        "console-mirror | attached=" + NetworkModLog.YesNo(ConsoleMirror.IsAttached));
+                }
+
                 var harmony = new Harmony(HarmonyId);
                 harmony.PatchAll(Assembly.GetExecutingAssembly());
-                Log("Applied built-in networking patches.");
+                NetworkModLog.FromSelf(NetworkModLogTag.Game, "built-in-patches-applied");
 
                 LoadExternalPlugins(harmony);
-                Log("Ready.");
+                NetworkModLog.FromSelf(NetworkModLogTag.Game, "mod-ready");
             }
             catch (Exception ex)
             {
-                Log("Init failed: " + ex);
+                NetworkModLog.SelfError(NetworkModLogTag.Game, "init-failed | " + ex);
             }
         }
 
         static void LoadExternalPlugins(Harmony harmony)
         {
-            string modsDir = Path.Combine(BaseDirectory, "mods");
+            string modsDir = ModsDirectory;
             if (!Directory.Exists(modsDir))
                 return;
 
+            string self = new FileInfo(Assembly.GetExecutingAssembly().Location).FullName;
             foreach (string dll in Directory.GetFiles(modsDir, "*.dll"))
             {
                 try
                 {
+                    if (string.Equals(new FileInfo(dll).FullName, self, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (string.Equals(Path.GetFileName(dll), "0Harmony.dll", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     var asm = Assembly.LoadFrom(dll);
                     harmony.PatchAll(asm);
-                    Log("Loaded plugin: " + Path.GetFileName(dll));
+                    NetworkModLog.FromSelf(NetworkModLogTag.Game, "plugin-loaded | file=" + Path.GetFileName(dll));
                 }
                 catch (Exception ex)
                 {
-                    Log("Failed to load plugin " + Path.GetFileName(dll) + ": " + ex.Message);
+                    NetworkModLog.SelfError(NetworkModLogTag.Game, "plugin-load-failed | file=" + Path.GetFileName(dll) + " | " + ex.Message);
                 }
             }
         }
 
-        internal static string BaseDirectory
+        public static string BaseDirectory
         {
             get { return AppDomain.CurrentDomain.BaseDirectory; }
         }
 
-        internal static void Log(string message)
+        public static string ModsDirectory
         {
-            try
-            {
-                string logDir = Path.Combine(BaseDirectory, "Logs");
-                Directory.CreateDirectory(logDir);
-                File.AppendAllText(Path.Combine(logDir, "networkmod.log"),
-                    DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff'Z' ") + message + Environment.NewLine);
-            }
-            catch { }
+            get { return Path.Combine(BaseDirectory, "mods"); }
         }
     }
 }

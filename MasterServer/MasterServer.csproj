@@ -12,6 +12,9 @@
     <PackageReference Include="Lidgren.Network" Version="0.2.*" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\Shared\MasterLog.cs" Link="Shared\MasterLog.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <Content Include=".env.example">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
